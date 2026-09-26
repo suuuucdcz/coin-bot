@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS tweets_seen (
     url TEXT PRIMARY KEY,
     at  INTEGER
 );
+CREATE TABLE IF NOT EXISTS networks (
+    seed  TEXT PRIMARY KEY,           -- wallet de départ
+    data  TEXT,                       -- JSON : wallets, liens, projets (radar/analysis/network.py)
+    at    INTEGER
+);
 CREATE TABLE IF NOT EXISTS x_accounts (
     handle     TEXT PRIMARY KEY,
     data       TEXT,                  -- JSON : abonnés, date de création, certifié
@@ -93,7 +98,8 @@ CREATE TABLE IF NOT EXISTS x_accounts (
 class DB:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
+        # timeout : si un autre programme écrit dans la base (script, outil), on attend au lieu de planter
+        self.conn = sqlite3.connect(path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.import_warnings: list[str] = []
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -333,6 +339,14 @@ class DB:
     def set_x_account(self, handle: str, data: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO x_accounts(handle,data,checked_at) VALUES(?,?,?)",
                           (handle.lower(), data, int(time.time())))
+        self.conn.commit()
+
+    def get_network(self, seed: str) -> tuple[str, int] | None:
+        row = self.conn.execute("SELECT data, at FROM networks WHERE seed=?", (seed,)).fetchone()
+        return (row["data"], row["at"]) if row else None
+
+    def put_network(self, seed: str, data: str) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO networks(seed,data,at) VALUES(?,?,?)", (seed, data, int(time.time())))
         self.conn.commit()
 
     def stats(self) -> dict[str, int]:

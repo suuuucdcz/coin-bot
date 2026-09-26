@@ -70,21 +70,31 @@ async def _list(session: aiohttp.ClientSession, url: str) -> list[dict] | None:
     return None
 
 
+# pump.fun a déplacé la fiche d'un token : /coins/<mint> renvoie 404 depuis septembre 2026 (vu en vrai :
+# toutes les alertes sortaient sans créateur, sans ATH ni historique). On essaie la nouvelle route d'abord.
+COIN_ROUTES = ("/coins-v2/{mint}", "/coins/{mint}")
+
+
 async def coin(session: aiohttp.ClientSession, mint: str) -> dict | None:
-    """Fiche d'un token pump.fun. Cette route renvoie parfois des erreurs : None dans ce cas."""
-    try:
-        async with session.get(f"{BASE}/coins/{mint}", headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=8)) as r:
-            if r.status != 200:
-                return None
-            data = await r.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        return None
+    """Fiche d'un token pump.fun (None si aucune route ne répond : les appelants le signalent)."""
+    data = None
+    for route in COIN_ROUTES:
+        try:
+            async with session.get(BASE + route.format(mint=mint), headers=HEADERS,
+                                   timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    break
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            continue
     if not isinstance(data, dict) or not data.get("mint"):
+        log.debug("pump.fun : fiche introuvable pour %s", mint)
         return None
     out = _coin(data, await sol_usd(session))
     out.update({"telegram": data.get("telegram"),
-                "website": data.get("website"), "pool": data.get("pump_swap_pool") or data.get("raydium_pool")})
+                "website": data.get("website"),
+                "pool": data.get("pump_swap_pool") or data.get("raydium_pool") or data.get("pool_address"),
+                "banned": bool(data.get("is_banned"))})
     return out
 
 
@@ -134,9 +144,13 @@ def _coin(c: dict, sol_price: float | None = None) -> dict:
     # Vu en pratique : VSOF (Reserve) ATH 12,2 M$ puis MC 2 k$ = pic puis rug.
     # Chute > 99 % depuis l'ATH -> « rug probable ».
     drop = (1 - mc / ath) if (ath and mc is not None and ath > 0) else None
+    reel = c.get("real_sol_reserves") if c.get("real_sol_reserves") is not None else c.get("real_quote_reserves")
     return {
         "mint": c.get("mint"),
         "creator": c.get("creator"),
+        "ath_ts": (c.get("ath_market_cap_timestamp") or 0) // 1000 or None,
+        "last_trade": (c.get("last_trade_timestamp") or 0) // 1000 or None,
+        "curve_sol": float(reel) / 1e9 if reel is not None else None,   # SOL vraiment déposés par les acheteurs
         "symbol": c.get("symbol"),
         "name": c.get("name"),
         "created": created,

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import alerts as A
 from .analysis.tracer import Tracer
@@ -27,7 +27,11 @@ from .telegram import esc
 log = logging.getLogger("discovery")
 
 GROUP = "découverte"
-LOOKBACK_S = 72 * 3600
+LOOKBACK_S = 7 * 86400
+# Un « succès » doit avoir TENU : vu en vrai, $TRUDY (3,4 M$) et $TJR (2,2 M$), retenus au sommet quelques heures
+# après leur création, ont été vidés par leur dev 5 et 21 minutes plus tard (−100 %).
+MIN_SUCCESS_AGE_S = 24 * 3600
+MIN_HELD_RATIO = 0.25       # la MC actuelle vaut encore au moins 25 % de l'ATH
 PAGES = 4                   # 4 × 50 tokens par tri
 MAX_NEW_PER_RUN = 8         # rythme raisonnable pour le plan gratuit Helius
 MAX_EVALUATED_PER_RUN = 25
@@ -44,6 +48,7 @@ RECHECK_S = 7 * 86400       # un créateur écarté n'est réévalué qu'une foi
 # « fonds souverains » du cluster Reserve (grosse liquidité pour paraître sérieux, puis retrait).
 BIG_FUNDING_SOL = 100
 SUSPECT_GROUP = "reserve-suspect"   # doit figurer dans RUG_GROUPS (c'est le cas par défaut)
+NETWORK_RUG_GROUP = "reseau-rugs"   # idem
 
 
 @dataclass
@@ -59,6 +64,7 @@ class Found:
     added: bool = False
     reason: str = ""
     rug_group: str | None = None     # dev relié à un cluster de rugs connu (surveillé, alertes ⛔)
+    upstream: list[str] = field(default_factory=list)   # financeurs non-exchange en amont
 
 
 def suspect_market(m: dict, min_mc: float) -> str | None:
@@ -89,7 +95,8 @@ async def candidates(http, min_ath: float) -> list[dict]:
             if not coins:
                 break
             for c in coins:
-                if c.get("mint") and c.get("creator") and now - (c.get("created") or 0) < LOOKBACK_S:
+                age = now - (c.get("created") or 0)
+                if c.get("mint") and c.get("creator") and MIN_SUCCESS_AGE_S <= age < LOOKBACK_S:
                     vus[c["mint"]] = c
             if sort == "created_timestamp" and coins and now - (coins[-1].get("created") or now) > LOOKBACK_S:
                 break  # on est déjà remonté au-delà de la fenêtre
@@ -99,6 +106,8 @@ async def candidates(http, min_ath: float) -> list[dict]:
         m = marches.get(mint)
         if not m or suspect_market(m, min_ath) is not None:
             continue
+        if c.get("ath") and (m["mc"] or 0) < MIN_HELD_RATIO * c["ath"]:
+            continue  # retombé : pas un succès qui a tenu
         ok.append({**c, "ath": m["mc"], "liquidity": m["liquidity"]})
     return sorted(ok, key=lambda c: c.get("ath") or 0, reverse=True)
 
@@ -111,7 +120,23 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
     if len(history) >= SPAM_MIN_COINS and hits / max(1, len(history)) < SPAM_MAX_HIT_RATE:
         f.reason = f"machine à lancer ({len(history)} tokens, {hits} succès)"
         return f
-    known = {a: lab for a, lab in pipeline.labels.items() if "hot wallet" in lab.lower() or "exchange" in lab.lower()}
+    # Réseau du dev (ses projets et ceux de ses wallets) : un « succès » au milieu de rugs = opérateur.
+    # Vu en vrai : le dev de $DJT (20 M$) avait fait VSOF ×2, NTDA ×2 et AROS, tous à −99,99 %.
+    # Il est suivi AVEC le groupe ⛔ : ses prochains tokens seront marqués à éviter.
+    from .analysis import network
+    try:
+        rep = await network.quick(pipeline, creator)
+    except Exception:
+        rep = None
+    if rep is not None:
+        f.upstream = [h["src"] for h in rep.funding_chain if not h.get("hot")]
+        flag = network.quick_verdict(rep)
+        if flag:
+            # Chaîne de relais au même montant, réseau à rugs, relances du même nom… : suivi en ⛔
+            f.rug_group = NETWORK_RUG_GROUP if "réseau à rugs" in flag else SUSPECT_GROUP
+            f.reason = f"⛔ {flag}"
+            return f
+    known ={a: lab for a, lab in pipeline.labels.items() if "hot wallet" in lab.lower() or "exchange" in lab.lower()}
     tracer = Tracer(pipeline.rpc, pipeline.cfg.hot_wallet_tx_threshold, known)
     funding, _nb, _raison = await tracer.first_funding(creator)
     if funding:
@@ -143,6 +168,27 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
     return f
 
 
+def _same_operator(db, f: Found) -> None:
+    """Un même financeur derrière plusieurs devs « à succès » = usine à tokens (vu en vrai : EdcS… finançait
+    USDFA, WOAR et JEANPHIL, chacun depuis un wallet neuf). Tous passent en suspects ⛔."""
+    import json as _json
+    for src in f.upstream:
+        cle = f"disc_up:{src}"
+        devs = _json.loads(db.get(cle) or "[]")
+        if f.creator not in devs:
+            devs.append(f.creator)
+            db.put(cle, _json.dumps(devs[-20:]))
+        if len(devs) >= 2:
+            if not f.rug_group:
+                f.rug_group = SUSPECT_GROUP
+                f.reason = f"⛔ même opérateur : {len(devs)} devs « à succès » financés par {A.short(src)}"
+            db.conn.executemany("UPDATE wallets SET grp=?, role=? WHERE address=? AND grp='découverte'",
+                                [(SUSPECT_GROUP, f"dev reclassé : même opérateur que {len(devs)} autres ({src[:4]})", d)
+                                 for d in devs])
+            db.conn.commit()
+            return
+
+
 async def run_once(pipeline, dry_run: bool = False) -> list[Found]:
     cfg, db = pipeline.cfg, pipeline.db
     out: list[Found] = []
@@ -161,6 +207,7 @@ async def run_once(pipeline, dry_run: bool = False) -> list[Found]:
         out.append(f)
         if dry_run:
             continue
+        _same_operator(db, f)   # même si déjà suspect : ses « frères » (même financeur) le deviennent aussi
         db.put(f"disc:{creator}", int(time.time()))
         if f.rug_group:
             # Surveillé AVEC son cluster : ses prochaines alertes seront marquées ⛔ à éviter

@@ -130,3 +130,23 @@ def test_valeurs_avec_commentaire(monkeypatch):
     monkeypatch.setenv("X_HEADLESS", "0 # visible")
     cfg = cfgmod.load()
     assert cfg.x_poll_seconds == 240 and cfg.x_quiet_hours is None and cfg.x_headless is False
+
+
+def test_heure_et_fuseau_sur_la_meme_ligne():
+    # Vu en vrai ($SKY) : « GMT+8 6PM–10PM » puis « UTC 10AM–2PM » à la ligne -> lancement 10:00 UTC, pas 22:00
+    i = parse_tweet("$SKY LAUNCHES TOMORROW\nGMT+8 6PM–10PM\nUTC 10AM–2PM", REF)
+    assert datetime.fromtimestamp(i.launch_ts, timezone.utc).hour == 10
+    i = parse_tweet("$ABC launch at 18:00 GMT+2", REF)
+    assert datetime.fromtimestamp(i.launch_ts, timezone.utc).hour == 16
+    assert parse_tweet("on se retrouve et 10 minutes après on lance $ABC", REF).launch_ts is None  # « et » ≠ ET
+
+
+def test_date_ecrite_prime_sur_demain():
+    # Vu en vrai : tweet du 25/09 « LAUNCHES TOMORROW Saturday 26/09 · 18:00 UTC », relu le 26 -> restait le 26
+    lu_le_26 = datetime(2026, 9, 26, 9, 0, tzinfo=timezone.utc)
+    i = parse_tweet("$ASH LAUNCHES TOMORROW Saturday 26/09 · 18:00 UTC", lu_le_26)
+    assert datetime.fromtimestamp(i.launch_ts, timezone.utc).strftime("%d/%m %H:%M") == "26/09 18:00"
+    i = parse_tweet("$SKY LAUNCHES TOMORROW — SEPTEMBER 26\nUTC 10AM–2PM", lu_le_26)
+    assert datetime.fromtimestamp(i.launch_ts, timezone.utc).strftime("%d/%m %H:%M") == "26/09 10:00"
+    i = parse_tweet("$BZL launches tomorrow 15:00 UTC, price 1.5x", lu_le_26)   # « 1.5 » n'est pas une date
+    assert datetime.fromtimestamp(i.launch_ts, timezone.utc).strftime("%d/%m %H:%M") == "27/09 15:00"

@@ -102,6 +102,9 @@ class FakePipeline:
     def label(self, a):
         return None
 
+    def trust(self, a):
+        return "prouvé"
+
 
 @pytest.fixture
 def agenda(tmp_path):

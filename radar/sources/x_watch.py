@@ -60,6 +60,8 @@ EXTRACT_JS = """
   const grp = a.querySelector('[role="group"]');
   const links = Array.from(a.querySelectorAll('[data-testid="tweetText"] a, [data-testid="card.wrapper"] a'))
       .map(x => (x.innerText || '') + ' ' + (x.href || ''));
+  const images = Array.from(a.querySelectorAll('[data-testid="tweetPhoto"] img'))
+      .map(i => i.src).filter(s => s && s.startsWith('https://pbs.twimg.com/media/'));
   return {
     url: link ? link.href : null,
     time: t ? t.getAttribute('datetime') : null,
@@ -68,6 +70,7 @@ EXTRACT_JS = """
     text: txt ? txt.innerText : '',
     stats: grp ? (grp.getAttribute('aria-label') || '') : '',
     links: links,
+    images: images,
   };
 })
 """
@@ -178,6 +181,9 @@ class XWatcher:
         self.on_problem = on_problem
         self.profile_requests: asyncio.Queue[tuple[str, asyncio.Future]] = asyncio.Queue()
         self._warned = False
+        # Actions choisies par l'IA locale (agenda._plan_x) : elles REMPLACENT des recherches fixes,
+        # le nombre de pages lues par tour ne change pas
+        self.extra_jobs: list[tuple[str, str]] = []
 
     async def _request(self, kind: str, handle: str):
         fut = asyncio.get_running_loop().create_future()
@@ -310,10 +316,17 @@ class XWatcher:
             log.info("Page À propos de @%s : rien reconnu (libellés X changés ?) : %r", handle, (text or "")[:300])
         return out
 
+    def _jobs(self) -> list[tuple[str, str]]:
+        """Pages à lire ce tour-ci. Les actions choisies par l'IA remplacent des recherches fixes :
+        le nombre de pages lues par tour reste le même (rythme anti-ban inchangé)."""
+        extra = self.extra_jobs[:2]
+        self.extra_jobs = []
+        jobs = [("search", q) for q in random.sample(QUERIES, len(QUERIES) - len(extra))] + extra
+        random.shuffle(jobs)
+        return jobs + [("timeline", a) for a in self.cfg.x_accounts]
+
     async def cycle(self, page) -> None:
-        jobs = [("search", q) for q in random.sample(QUERIES, len(QUERIES))]
-        jobs += [("timeline", a) for a in self.cfg.x_accounts]
-        for kind, arg in jobs:
+        for kind, arg in self._jobs():
             try:
                 tweets = await (self.search(page, arg) if kind == "search" else self.timeline(page, arg))
                 log.info("X %s « %s » : %d tweets", kind, arg, len(tweets))

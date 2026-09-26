@@ -56,6 +56,10 @@ class FakePipeline:
     def __init__(self, db):
         self.db, self.rpc, self.http, self.mints = db, FakeRPC(), None, set()
         self.watched = {WATCHED}
+        self.decisions_since = 0
+
+    def decisions_line(self):
+        return "12 événements · 1 alertes · écartés : 8 achat d'un satellite"
 
     def label(self, a):
         w = self.db.wallet(a)
@@ -82,6 +86,9 @@ class FakeWatcher:
 class FakeAgenda:
     class jev:
         enabled = False
+
+    class llm:
+        enabled, model, calls, last_ms, _ok_until = False, "gemma4:e4b", 0, 0, 0
 
     def render(self):
         return "📅 <b>AGENDA</b>\nrien"
@@ -190,4 +197,4 @@ def test_toutes_les_alertes_en_html_valide():
     assert html_ok(texte) and "PRUDENCE" in texte and "&lt;born&gt;" in texte
     kb = A.token_buttons(info, WATCHED, mute=WATCHED, follow=WATCHED)
     assert all(len(b.get("callback_data", "")) <= 64 for row in kb["inline_keyboard"] for b in row)
-    assert re.search(r"t:\w+", str(kb))
+    assert re.search(r"n:\w+", str(kb))   # bouton « 🕸 Réseau du dev »

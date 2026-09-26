@@ -20,7 +20,10 @@ SEP = "───────────────"
 RUG_MARK = "opérateur de rugs en série"
 # Drapeaux qui justifient « prudence » (et pas seulement « à vérifier »)
 SEVERE = ("mint authority", "freeze authority", "lanceur en série", "imite", "de la supply dès la création",
-          "arnaque", "abonnés achetés", "racheté", "pas vers @", "liquidité très faible", "faux coin")
+          "arnaque", "abonnés achetés", "racheté", "pas vers @", "liquidité très faible", "faux coin",
+          "top 10 des détenteurs", "le dev détient encore", "achat groupé", "depuis son ath",
+          "presque aucun acheteur", "masqué par pump.fun", "ferme de bots", "réseau à rugs",
+          "réseau sans aucun succès", "financement brouillé", "même opérateur")
 
 
 def short(a: str | None) -> str:
@@ -69,6 +72,11 @@ def verdict(flags: list[str]) -> str:
     if flags:
         return f"🟡 <b>À vérifier</b> — {len(flags)} point{'s' if len(flags) > 1 else ''} à regarder"
     return "🟢 Rien de suspect détecté <i>(ça ne garantit rien)</i>"
+
+
+def is_safe(flags: list[str]) -> bool:
+    """Assez propre pour « À ne pas rater » : pas d'opérateur de rugs, aucun signal grave."""
+    return not any(RUG_MARK in f for f in flags) and not any(s in f.lower() for f in flags for s in SEVERE)
 
 
 def flags_block(flags: list[str]) -> list[str]:
@@ -140,6 +148,8 @@ def token_block(info: TokenInfo, extra_flags: list[str]) -> list[str]:
     d = dev_line(info)
     if d:
         lines.append(d)
+    if info.network:
+        lines.append(esc(info.network))
     lines.append(social_line(info))
     return lines
 
@@ -176,12 +186,39 @@ def token_buttons(info: TokenInfo, wallet: str | None = None, mute: str | None =
         social.append(("👛 Wallet", f"https://solscan.io/account/{wallet}"))
     actions = []
     if info.creator:
-        actions.append(("🧬 Tracer le dev", f"t:{info.creator}"))
+        actions.append(("🕸 Réseau du dev", f"n:{info.creator}"))
     if follow:
         actions.append(("👁 Suivre le dev", f"s:{follow}"))
     if mute:
         actions.append(("🔇 Couper 24 h", f"m:{mute}"))
     return keyboard(liens, social, actions)
+
+
+def top_card(info: TokenInfo, title: str, why: str, flags: list[str]) -> str:
+    """Alerte courte « À ne pas rater » : quoi, pourquoi, verdict, CA, marché, dev. Rien d'autre."""
+    all_flags = list(dict.fromkeys(info.flags + flags))
+    lines = [f"🚨 <b>{esc(title)}</b>", token_title(info), verdict(all_flags), f"💡 {why}", SEP,
+             f"📜 <code>{info.mint}</code>", market_line(info)]
+    d = dev_line(info)
+    if d:
+        lines.append(d)
+    if info.network:
+        lines.append(esc(info.network))
+    lines.append(social_line(info))
+    lines += flags_block(all_flags)
+    return "\n".join(lines)
+
+
+def top_buttons(info: TokenInfo, trade_url: str = "") -> dict:
+    """Un clic : copier le CA (à coller dans ta plateforme), ou ouvrir le token."""
+    premiere = [("📋 Copier le CA", f"copy:{info.mint}")]
+    if trade_url and "{mint}" in trade_url:
+        premiere.append(("⚡ Ouvrir sur ma plateforme", trade_url.replace("{mint}", info.mint)))
+    return keyboard(premiere,
+                    [("📈 GMGN", f"https://gmgn.ai/sol/token/{info.mint}"),
+                     ("📊 DexScreener", info.dex_url or f"https://dexscreener.com/solana/{info.mint}"),
+                     ("🟣 pump.fun", f"https://pump.fun/coin/{info.mint}")],
+                    [("🔎 Fiche complète", f"k:{info.mint}"), ("🕸 Réseau du dev", f"n:{info.creator}" if info.creator else "")])
 
 
 def wallet_buttons(*addrs: str, sig: str | None = None, mute: str | None = None,

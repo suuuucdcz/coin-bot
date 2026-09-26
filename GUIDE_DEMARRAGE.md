@@ -108,7 +108,16 @@ Avec une clé TypeSafe (`configurer.bat`, étape 6), Jev donne un avis rapide av
 
 Il ajoute des drapeaux 🚩 ou aide à choisir le compte officiel, mais ne confirme **jamais** un token tout seul : Jev n'est pas conçu pour du contenu fait pour tromper. Coût : environ 0,04 $ par million de tokens, soit quelques centimes par mois. Sans clé, le radar fonctionne exactement pareil.
 
-## 8. Veille X : limiter le risque de ban
+## 8. IA locale (Gemma 4, gratuite)
+
+Si Ollama est installé (ollama.com) avec le modèle `gemma4:e4b`, le radar s'en sert automatiquement pour :
+- **lire les tweets comme un humain**, y compris l'heure écrite sur une image (« 18:00 UTC » sur un visuel) ;
+- **trier** : annonce du projet, promo d'un caller, arnaque ou bruit ;
+- **choisir les prochaines recherches X** (le CA d'un coin annoncé, le compte officiel). Ces recherches **remplacent** des recherches fixes : le nombre de pages lues par X ne change pas.
+
+Elle ne clique, ne like et ne suit jamais rien. Elle ne peut qu'ajouter un 🚩, compléter une heure ou réordonner la veille, jamais déclencher « À ne pas rater ». Si Ollama est éteint, tout continue avec les règles. Son état est visible dans `/statut`.
+
+## 9. Veille X : limiter le risque de ban
 
 - Compte secondaire conseillé. Le radar ne publie rien et ne like rien : il lit seulement.
 - Rythme lent et aléatoire, avec une **pause la nuit** (`X_QUIET_HOURS=3-8`, heure de Paris).

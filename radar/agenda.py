@@ -26,6 +26,7 @@ from . import devs
 from .analysis import xlinks
 from .analysis.enrich import token_info, x_handle
 from .analysis.jev import ROLE_LABELS, Jev
+from .analysis.llm import HANDLE_RE, LocalLLM, fetch_images, time_in_text
 from .analysis.xparse import parse_tweet
 from .telegram import buttons, esc
 
@@ -39,6 +40,8 @@ COMMON_FUNDER_STRONG = 3            # un wallet qui a financé ≥ 3 acheteurs d
 # Vérification d'un candidat : le compte officiel (X, bio, site de sa bio) affiche-t-il CE contrat ?
 VERIFY_DELAYS_S = (30, 120, 300, 900, 1800)
 PROFILE_FRESH_S = 1800
+READ_PER_BATCH = 12          # tweets lus par l'IA locale par page X (la carte graphique est partagée)
+PLAN_EVERY_S = 600           # le chef d'orchestre choisit les prochaines recherches X toutes les 10 min
 
 
 def norm_ticker(s: str | None) -> str:
@@ -87,6 +90,10 @@ class Agenda:
         self._verifying: set[tuple[int, str]] = set()
         self._profiling: set[str] = set()
         self.jev = Jev(getattr(pipeline.cfg, "typesafe_api_key", ""), pipeline.http)
+        cfg = pipeline.cfg
+        self.llm = LocalLLM(getattr(cfg, "llm_url", "http://127.0.0.1:11434"), getattr(cfg, "llm_model", "gemma4:e4b"),
+                            pipeline.http, getattr(cfg, "llm_enabled", False))
+        self._last_plan = 0.0
         for r in self.db.announcements_since(int(time.time()) - MATCH_WINDOW_S):
             for c in json.loads(r["details"] or "{}").get("dev_candidates", []):
                 self._dev_cands[c["address"]] = r["id"]
@@ -214,10 +221,12 @@ class Agenda:
             indices.append(f"ses métadonnées pointent vers @{meta_handle}, le compte officiel (copiable : simple indice)")
         if rep.creator in known_devs or creator_funder in known_devs or top_funder in known_devs:
             preuves.append("lié au dev probable déjà identifié par la chasse au dev")
-        if top_funder and top_n >= COMMON_FUNDER_STRONG:
-            preuves.append(f"un même wallet a financé {top_n} de ses acheteurs (opération organisée)")
-        if top_funder and creator_funder == top_funder:
-            preuves.append("le créateur et les acheteurs ont le même financeur")
+        # Acheteurs financés par un même wallet = opération organisée : c'est un opérateur de faux coins
+        # (vu en vrai : ses acheteurs sont une ferme de bots qui achète tous les lancements puis revend),
+        # PAS une preuve que c'est le dev du vrai coin.
+        organise = bool(top_funder and (top_n >= COMMON_FUNDER_STRONG or creator_funder == top_funder))
+        if organise:
+            indices.append(f"acheteurs financés par un même wallet ({top_n}) : opération organisée")
         from_dev = bool(preuves)
 
         # Wallet du dev à traquer : financeur commun (créateur + acheteurs) > financeur principal > créateur
@@ -237,13 +246,13 @@ class Agenda:
                     cands.insert(0, {"address": addr, "reason": reason})
                 await self.p.watch(addr, f"DEV_FAKE_{ann['ticker']}"[:40], group, f"dev probable : {reason}", 1, None)
             det["dev_candidates"] = cands[:8]
-            # Petits wallets financés par le dev : ils rachèteront sans doute le vrai coin tôt
-            for buyer, funder in list(rep.funded_by.items())[:30]:
-                if funder in {a for a, _ in tracked} and buyer not in {a for a, _ in tracked} \
-                        and buyer not in {s["address"] for s in sats}:
-                    sats.append({"address": buyer, "role": f"acheteur du faux coin (financé par {funder[:4]})", "dev": funder})
-                    await self.p.watch(buyer, f"SAT_{buyer[:4]}", group, "acheteur du faux coin", 2, funder)
+            # Les petits acheteurs ne sont PAS suivis : ce sont des bots qui achètent tous les lancements
             det["dev_satellites"] = sats
+        elif organise:
+            # Organisateur du faux coin : suivi comme opérateur à éviter (ses prochains tokens seront ⛔)
+            for addr, role in ((dev_wallet, "organisateur de faux coins"), (rep.creator, "créateur d'un faux coin")):
+                if addr:
+                    await self.p.watch(addr, f"FAUX_{ann['ticker']}_{addr[:4]}"[:40], "faux-coins", role, 1, None)
 
         fake = {"mint": rep.mint, "verdict": rep.verdict, "creator": rep.creator, "dev": dev_wallet if from_dev else None,
                 "from_dev": from_dev, "preuves": preuves, "ts": int(time.time()), "real": None,
@@ -314,7 +323,16 @@ class Agenda:
         ann_id = self._dev_cands.get(creator)
         ann = self.db.announcement(ann_id) if ann_id else None
         if ann and not ann["ca"]:
+            info = await token_info(self.p.rpc, self.p.http, mint, creator, with_dev_history=False)
+            if not self._same_ticker(ann, info.symbol):
+                log.info("$%s : le dev probable a créé $%s (autre ticker), pas relié", ann["ticker"], info.symbol)
+                return
             await self._candidate(ann, mint, creator, None, "on-chain", "créé par le dev probable", by_dev=True)
+
+    @staticmethod
+    def _same_ticker(ann, symbol: str | None) -> bool:
+        """Vu en vrai : un « dev probable » a créé un token nommé « $TICKER », relié à l'annonce $DOG."""
+        return bool(symbol) and norm_ticker(symbol) == norm_ticker(ann["ticker"])
 
     async def hunt_dev(self, ann_id: int) -> None:
         """CA pas encore publié : on cherche le wallet du dev pour le surveiller avant le lancement."""
@@ -387,7 +405,72 @@ class Agenda:
             self._hunting.discard(ann_id)
 
     # ------------------------------------------------------------------ entrée : tweets
+    @staticmethod
+    def _worth_reading(t: dict, info) -> bool:
+        """Tweets qui méritent l'IA : annonce probable, ticker, CA, ou image (l'heure est souvent dessus)."""
+        return bool(info.is_candidate or info.tickers or info.cas or t.get("images"))
+
+    @staticmethod
+    def _merge_reading(info, lu: dict, tweet_time: datetime, texte: str = "") -> bool:
+        """Complète la lecture par règles avec celle de l'IA. False = tweet à ignorer (bruit sûr)."""
+        from .analysis.xparse import AMBIGUOUS_ZONES, PLATFORMS, _at, explicit_date, zone_tz
+        if lu["type"] == "autre" and lu["confiance"] >= 0.85 and not info.cas and not info.launch_ts:
+            return False
+        if lu["type"] == "arnaque" and lu["confiance"] >= 0.75:
+            info.scam.append(f"IA locale : arnaque probable ({lu['confiance']:.0%}) — {lu['raison']}")
+        if not info.tickers and lu["ticker"]:
+            info.tickers = [lu["ticker"]]
+        if not info.cas and lu["contrat"]:
+            info.cas = [lu["contrat"]]
+        if not info.launch_ts and lu["heure"] and (lu["heure_sur_image"] or time_in_text(lu["heure"], texte)):
+            h, mi = (int(x) for x in lu["heure"].split(":"))
+            demain = lu["jour"] == "demain"
+            date = explicit_date(texte, tweet_time)
+            ou = " (lue sur l'image)" if lu["heure_sur_image"] else ""
+            if lu["fuseau"]:
+                info.launch_ts = int(_at(tweet_time, zone_tz(lu["fuseau"]), h, mi, demain, date).timestamp())
+                info.launch_txt = f"{lu['heure']} {lu['fuseau']}{ou} · lu par l'IA"
+            else:
+                info.launch_alts = sorted({int(_at(tweet_time, z, h, mi, demain, date).timestamp())
+                                           for z in AMBIGUOUS_ZONES})
+                info.launch_ts = int(_at(tweet_time, "UTC", h, mi, demain, date).timestamp())
+                info.launch_txt = f"{lu['heure']} (fuseau ?){ou} · lu par l'IA"
+        if not info.platform and lu["plateforme"]:
+            info.platform = next((nom for rx, nom in PLATFORMS if rx.search(lu["plateforme"])), None)
+        if lu["type"] == "annonce_projet" and lu["confiance"] >= 0.6:
+            info.launch_words = True
+        return True
+
+    async def _plan_x(self) -> None:
+        """Chef d'orchestre de la veille X : l'IA choisit 2 actions parmi celles préparées par le code
+        (chercher le CA d'un coin annoncé, lire son compte officiel). Sans IA : la plus proche du lancement."""
+        if not self.xw:
+            return
+        now = time.time()
+        rows = [r for r in self.db.announcements_since(int(now) - MATCH_WINDOW_S)
+                if not r["ca"] and r["ticker"] and not json.loads(r["flags"] or "[]")]
+        rows.sort(key=lambda r: abs((r["launch_ts"] or now + 86400) - now))
+        actions, jobs, contexte = [], [], []
+        for r in rows[:10]:
+            official = self._official(r)[0]
+            n = len(json.loads(r["sources"] or "[]")) or 1
+            quand = countdown(r["launch_ts"]) if r["launch_ts"] else "heure inconnue"
+            contexte.append(f"- ${r['ticker']} : {quand}, {n} tweet(s), compte officiel probable @{official}")
+            actions.append(f"chercher le contrat de ${r['ticker']} (tweets « ${r['ticker']} CA »)")
+            jobs.append(("search", f'"${r["ticker"]}" (CA OR contract OR pump OR solscan)'))
+            if official and HANDLE_RE.match(official):
+                actions.append(f"lire les derniers tweets de @{official} (compte de ${r['ticker']})")
+                jobs.append(("timeline", official))
+        if not actions:
+            return
+        choix = await self.llm.choose("\n".join(contexte), actions, 2)
+        if choix is None:
+            choix = list(range(min(2, len(actions))))   # sans IA : les coins les plus proches du lancement
+        self.xw.extra_jobs = [jobs[i] for i in choix]
+        log.info("Veille X : prochaines actions %s", " · ".join(actions[i] for i in choix))
+
     async def on_tweets(self, tweets: list[dict]) -> None:
+        lus = 0
         for t in tweets:
             url = t.get("url")
             if not url or self.db.tweet_seen(url):
@@ -396,6 +479,15 @@ class Agenda:
             if dt and datetime.now(timezone.utc) - dt > timedelta(hours=36):
                 continue
             info = parse_tweet(t.get("text", ""), dt, t.get("links"))
+            if lus < READ_PER_BATCH and self._worth_reading(t, info) and await self.llm.available():
+                lus += 1
+                images = await fetch_images(self.p.http, t.get("images") or []) if t.get("images") else []
+                lu = await self.llm.read_tweet(t.get("text", ""), t.get("handle"), images)
+                if lu:
+                    t["ai_local"] = lu
+                    if not self._merge_reading(info, lu, dt or datetime.now(timezone.utc), t.get("text", "")):
+                        log.info("Ignoré (IA locale : %s à %.0f %%) : %s", lu["type"], 100 * lu["confiance"], url)
+                        continue
             if not info.is_candidate:
                 continue
             if self.jev.enabled:
@@ -427,6 +519,10 @@ class Agenda:
         src = {"handle": t.get("handle"), "url": t["url"], "text": (t.get("text") or "")[:280]}
         if t.get("ai"):
             src["p_off"] = round(t["ai"]["p_officiel"], 2)
+        elif t.get("ai_local"):
+            lu = t["ai_local"]
+            src["p_off"] = round(lu["confiance"] if lu["type"] == "annonce_projet"
+                                 else 1 - lu["confiance"] if lu["type"] == "promo_tiers" else 0.3, 2)
         if row:
             up: dict = {}
             sources = json.loads(row["sources"] or "[]")
@@ -489,7 +585,8 @@ class Agenda:
             tweet_text=(t.get("text") or "")[:1000], launch_ts=info.launch_ts, launch_txt=info.launch_txt,
             platform=info.platform, ca=ca, flags=json.dumps(info.scam), status="annoncé",
             details=json.dumps({**({"ca_proof": "annonce"} if ca else {}),
-                                **({"launch_alts": info.launch_alts} if info.launch_alts else {})}))
+                                **({"launch_alts": info.launch_alts} if info.launch_alts else {}),
+                                **({"tweet_time": t["time"]} if t.get("time") else {})}))
         self._dirty = True
         if t.get("verified"):
             self.db.update_announcement(ann_id, account=json.dumps({"handle": t.get("handle"), "verified": True}))
@@ -730,7 +827,7 @@ class Agenda:
             if h in p_off:
                 score += round(3 * p_off[h])
                 if p_off[h] >= 0.7:
-                    why.append(f"IA Jev : compte du projet ({p_off[h]:.0%})")
+                    why.append(f"IA : compte du projet ({p_off[h]:.0%})")
             if score > best_score:
                 best, best_score, best_why = h, score, why
         return best, best_why
@@ -804,7 +901,7 @@ class Agenda:
         if creator in self._dev_cands:
             # Un dev probable vient de créer un coin : c'est très probablement le coin annoncé
             ann = self.db.announcement(self._dev_cands[creator])
-            if ann and not ann["ca"]:
+            if ann and not ann["ca"] and self._same_ticker(ann, msg.get("symbol")):
                 await self._candidate(ann, msg["mint"], creator, None, "pump.fun",
                                       f"créé par le dev probable · {msg.get('solAmount', 0):.2f} SOL achetés",
                                       by_dev=True)
@@ -861,6 +958,8 @@ class Agenda:
         official, _why = self._official(ann)
         annonceurs = {src.get("handle") or "" for src in json.loads(ann["sources"] or "[]")}
         dev_link = by_dev or (creator is not None and self._dev_cands.get(creator) == ann["id"])
+        # Le lien par le dev n'est une preuve forte que si ce wallet a été trouvé de façon fiable
+        dev_link = dev_link and self.p.trust(creator) in ("référence", "prouvé", "lié")
         # Heure de création du token (pas l'heure où on le voit : DexScreener est relu toutes les 90 s)
         cree = created_ts or time.time()
         heures = [ann["launch_ts"]] if ann["launch_ts"] else []
@@ -914,6 +1013,19 @@ class Agenda:
         self._dirty = True
         await self.update_card(ann["id"])
         await self._notify_real(ann, mint, creator)
+        if ev.level == "fort" and hasattr(self.tg, "enqueue_top"):
+            # Coin annoncé sur X ET lien vérifié : c'est une alerte « à ne pas rater » (si rien de grave)
+            try:
+                info = await token_info(self.p.rpc, self.p.http, mint, creator)
+                flags = list(info.flags) + self.p.rug_flags(creator)
+                if A.is_safe(flags):
+                    preuve = (ev.strong or ["lien vérifié"])[0]
+                    self.tg.enqueue_top(
+                        A.top_card(info, f"${ann['ticker']} ANNONCÉ SUR X EST LANCÉ",
+                                   f"Annoncé par <b>@{esc(official)}</b> · ✅ {esc(preuve)}", flags),
+                        A.top_buttons(info, getattr(self.p.cfg, "trade_url", "")), key=f"top:match:{mint}")
+            except Exception:
+                log.exception("Alerte « à ne pas rater » impossible pour %s", mint)
         self.p._spawn(self.resolve(ann["id"]))
 
     async def _verify_official(self, ann_id: int, mint: str, creator: str | None, where: str) -> None:
@@ -1039,10 +1151,12 @@ class Agenda:
                 out += [self._line(r, now) for r in sorted(sections[key], key=lambda r: r["launch_ts"] or 0)]
         if len(out) == 1:
             out.append("\nAucun lancement daté pour l'instant. La veille X tourne 👀")
+        from .telegram import SECTION_INFO
+        legende = "\n\n" + SECTION_INFO["agenda"]
         text = "\n".join(out)
-        if len(text) > 4000:
-            text = text[:3950].rsplit("\n", 1)[0] + "\n… (liste tronquée)"
-        return text
+        if len(text) + len(legende) > 4000:
+            text = text[:3950 - len(legende)].rsplit("\n", 1)[0] + "\n… (liste tronquée)"
+        return text + legende
 
     def _line(self, r, now: int) -> str:
         when = f"<b>{paris(r['launch_ts'])}</b>" if r["launch_ts"] else "<b>--:--</b>"
@@ -1050,10 +1164,14 @@ class Agenda:
         if r["name"]:
             tick += f" ({esc(r['name'][:24])})"
         acc = json.loads(r["account"] or "{}")
-        who = f"<a href=\"{esc(r['tweet_url'])}\">@{esc(r['handle'])}</a>"
-        if acc.get("followers") is not None:
-            f = acc["followers"]
-            who += f" ({f / 1000:.1f} k ab.)" if f >= 1000 else f" ({f} ab.)"
+        official = self._official(r)[0] or r["handle"]
+        who = f"👑 <a href=\"https://x.com/{esc(official)}\">@{esc(official)}</a>"
+        if (acc.get("handle") or "").lower() == (official or "").lower() and "followers" in acc:
+            t = xlinks.account_trust(acc, r["ticker"], r["name"], r["ca"])
+            who += f" {t.icon}"
+            if acc.get("followers") is not None:
+                f = acc["followers"]
+                who += f" ({f / 1000:.1f} k ab.)" if f >= 1000 else f" ({f} ab.)"
         parts = [f"{when} · {tick}" + (f" · {esc(r['platform'])}" if r["platform"] else "") + f" · {who}"]
         st = r["status"] or "annoncé"
         icon = {"trading ouvert": "🟢", "annoncé": "⏳", "contrat prêt, pas de pool": "📜"}.get(st, "🔵")
@@ -1141,14 +1259,16 @@ class Agenda:
                     out.append("    ❓ lien avec le dev non prouvé (copie possible)")
         if not n:
             out.append("\nAucun faux coin détecté aujourd'hui pour l'instant.")
+        from .telegram import SECTION_INFO
         text = "\n".join(out)
-        return text[:3950] + ("\n… (tronqué)" if len(text) > 3950 else "")
+        text = text[:3700] + ("\n… (tronqué)" if len(text) > 3700 else "")
+        return text + "\n\n" + SECTION_INFO["fakes"]
 
     async def _refresh_fakes(self) -> None:
         text = self.render_fakes()
         if text == self._last_fakes_render and not self._fakes_dirty:
             return
-        key = f"fakes_msg:{self.tg.chat_id}:{datetime.now(PARIS).strftime('%Y-%m-%d')}"
+        key = f"fakes_msg:{self.tg.place('fakes')}:{datetime.now(PARIS).strftime('%Y-%m-%d')}"
         msg_id = self.db.get(key)
         ok = bool(msg_id) and await self.tg.edit_now(int(msg_id), text)
         if not ok:
@@ -1163,12 +1283,15 @@ class Agenda:
         except Exception:
             log.exception("Compartiment faux coins non mis à jour")
         await self._post_pending()
+        if time.time() - self._last_plan > PLAN_EVERY_S:
+            self._last_plan = time.time()
+            self.p._spawn(self._plan_x())
         day = datetime.now(PARIS).strftime("%Y-%m-%d")
         text = self.render()
         stale = time.time() - self._last_edit > 300  # compte à rebours rafraîchi toutes les 5 min
         if text == self._last_render and not stale and not self._dirty:
             return
-        key = f"agenda_msg:{self.tg.chat_id}:{day}"
+        key = f"agenda_msg:{self.tg.place('agenda')}:{day}"
         msg_id = self.db.get(key)
         ok = False
         if msg_id:

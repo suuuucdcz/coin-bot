@@ -166,6 +166,12 @@ class Bot:
         elif kind == "k":
             await self.tg.answer_callback(cb["id"])
             await self.cmd_token(ctx, [arg])
+        elif kind == "n":
+            await self.tg.answer_callback(cb["id"], "🕸 Construction de la toile…")
+            await self.cmd_reseau(ctx, [arg])
+        elif kind == "N":
+            await self.tg.answer_callback(cb["id"], "👁 Ajout du réseau…")
+            await self.follow_network(ctx, arg)
         elif kind == "w":
             await self.tg.answer_callback(cb["id"])
             await self.cmd_wallet(ctx, [arg])
@@ -178,7 +184,9 @@ class Bot:
     # --- commandes -----------------------------------------------------------------------------
     async def cmd_aide(self, ctx: Ctx, args: list[str]) -> None:
         await ctx.send(
-            "🛰 <b>MEMECOIN RADAR — COMMANDES</b>\n" + A.SEP + "\n"
+            "🛰 <b>MEMECOIN RADAR — COMMANDES</b>\n"
+            "🚨 <i>Les alertes vérifiées arrivent en privé, dans ta conversation avec le bot (« À ne pas "
+            "rater »). Le groupe garde tout le détail, sans son.</i>\n" + A.SEP + "\n"
             "📊 /statut — état du radar\n"
             "📅 /agenda — coins annoncés à venir\n"
             "🪙 /token &lt;CA&gt; — fiche complète d'un token\n"
@@ -187,6 +195,7 @@ class Bot:
             "👁 /suivre &lt;adresse&gt; [nom] — le surveiller\n"
             "❌ /retirer &lt;adresse&gt; — ne plus le surveiller\n"
             "🐦 /x &lt;compte&gt; — fiabilité d'un compte X\n"
+            "🕸 /reseau &lt;adresse&gt; — toile d'un dev : ses wallets, ses projets, leur sort\n"
             "📋 /watchlist — wallets surveillés\n"
             "🔕 /silence 60 — alertes sans son pendant 60 min (/silence off)\n"
             + A.SEP + "\n"
@@ -225,11 +234,17 @@ class Bot:
             f"🔑 Clé Helius : {helius}",
             f"🟣 PumpPortal : {etat(pumpportal.state['down_since'])} · {pumpportal.state['tokens']} tokens vus",
             f"🐦 Veille X : {x}",
+            "🧠 IA locale : " + (f"🟢 {esc(self.agenda.llm.model)} · {self.agenda.llm.calls} lectures"
+                                  + (f" · {self.agenda.llm.last_ms / 1000:.1f} s la dernière" if self.agenda.llm.calls else "")
+                                  if self.agenda.llm.enabled and time.time() < self.agenda.llm._ok_until
+                                  else "⚪ indisponible (Ollama éteint ?)"),
             f"🤖 IA Jev : {'🟢 active' if self.agenda.jev.enabled else '⚪ non configurée'}",
             A.SEP,
             f"👛 Wallets suivis : <b>{len(self.watcher.addresses)}</b> / {self.cfg.watch_max}",
             f"📜 Contrats en attente de lancement : {len(self.p.mints)}",
             f"📨 Transactions analysées : {self.stats.get('tx', 0)}",
+            f"🧮 Depuis {datetime.fromtimestamp(self.p.decisions_since, PARIS):%H:%M} : "
+            + esc(self.p.decisions_line()),
             f"🚨 Alertes 24 h : <b>{sum(par_type.values())}</b>" + (f" ({top})" if top else ""),
             f"🕐 Dernière alerte : {derniere}",
             f"🔔 Son : {son}",
@@ -376,7 +391,7 @@ class Bot:
                              f"<code>{src['src']}</code>")
             if n_out:
                 lines.append(f"➡️ A financé {n_out} wallet(s) connus du radar")
-        actions = [("🧬 Tracer", f"t:{addr}")]
+        actions = [("🧬 Tracer", f"t:{addr}"), ("🕸 Réseau", f"n:{addr}")]
         if w and w["active"]:
             actions += [("❌ Retirer", f"u:{addr}"), ("🔇 Couper 24 h", f"m:{addr}")]
         else:
@@ -538,14 +553,70 @@ class Bot:
         await ctx.edit(mid, "\n".join(lines), keyboard([("🐦 Ouvrir le profil", f"https://x.com/{h}"),
                                                         ("🔎 Ses CA publiés", f"https://x.com/search?q={recherche}&f=live")]))
 
+    # --- réseau d'un dev -------------------------------------------------------------------------------
+    async def cmd_reseau(self, ctx: Ctx, args: list[str]) -> None:
+        addr = self._address(args)
+        if not addr:
+            await ctx.send("Usage : /reseau &lt;adresse du dev, ou CA d'un token&gt;")
+            return
+        mid = await ctx.send(f"🕸 Construction de la toile de <code>{addr}</code>…\n"
+                             "<i>Financeurs, wallets frères, wallets financés, projets de chacun, vitesse de "
+                             "revente du dev : 1 à 3 minutes (les alertes en direct restent prioritaires).</i>")
+        self._spawn(self._reseau_job(ctx, mid, addr))
+
+    async def _reseau_job(self, ctx: Ctx, mid: int | None, addr: str) -> None:
+        from .analysis import network
+        try:
+            if await self.p.rpc.mint_info(addr):  # un CA : on part de son créateur
+                info = await token_info(self.p.rpc, self.p.http, addr, with_dev_history=False)
+                if not info.creator:
+                    await ctx.edit(mid, "❌ Créateur de ce token introuvable.")
+                    return
+                addr = info.creator
+            rep = await network.build(self.p, addr)
+        except Exception as e:
+            log.exception("Toile impossible pour %s", addr)
+            await ctx.edit(mid, f"❌ Toile impossible : {esc(e)}")
+            return
+        label = self.p.label(addr) or A.short(addr)
+        await ctx.edit(mid, network.telegram_text(rep, label),
+                       keyboard([("👁 Suivre tout le réseau", f"N:{addr}"), ("🔍 Solscan", f"https://solscan.io/account/{addr}")]))
+        try:
+            await self.tg.send_document(ctx.chat_id, f"reseau_{label.replace('…', '_')}.html",
+                                        network.to_html(rep, label).encode("utf-8"),
+                                        caption=f"🕸 Toile interactive de <b>{esc(label)}</b> : ouvre le fichier dans "
+                                                "ton navigateur.", thread_id=ctx.thread_id, reply_to=mid)
+        except Exception as e:
+            log.warning("Toile HTML non envoyée : %s", e)
+
+    async def follow_network(self, ctx: Ctx, seed: str) -> None:
+        """Met sous surveillance tous les wallets de la toile (réseau à rugs = groupe ⛔)."""
+        from .analysis import network
+        saved = self.db.get_network(seed)
+        if not saved:
+            await ctx.send("Toile introuvable : relance /reseau d'abord.")
+            return
+        rep = network.Report.from_json(saved[0])
+        flag = rep.verdict()[1]
+        groupe = "reseau-rugs" if flag and "rugs" in flag else f"réseau {A.short(seed)}"
+        ajoutes = 0
+        for a, w in rep.wallets.items():
+            if w["role"] != "exchange" and a not in self.p.watched:
+                ajoutes += await self.p.watch(a, w["label"][:30], groupe, f"réseau de {A.short(seed)} : {w['role']}",
+                                              1, seed)
+        await ctx.send(f"👁 <b>{ajoutes} wallet(s) du réseau</b> ajoutés à la surveillance (groupe « {esc(groupe)} »)"
+                       + ("\n⛔ Réseau à rugs : leurs prochains tokens seront marqués à éviter." if groupe == "reseau-rugs" else ""))
+
     # --- tableau de bord épinglé ---------------------------------------------------------------------
     async def dashboard(self) -> None:
         """Message d'état épinglé (compartiment ⚙️ / 🤖), mis à jour toutes les 5 min."""
         await asyncio.sleep(30)
         while True:
             try:
-                text = self.status_text() + "\n<i>Tableau de bord mis à jour toutes les 5 min · /aide</i>"
-                key = f"dashboard:{self.tg.chat_id}"
+                from .telegram import SECTION_INFO
+                text = (self.status_text() + "\n<i>Tableau de bord mis à jour toutes les 5 min · /aide</i>\n\n"
+                        + SECTION_INFO["system"])
+                key = f"dashboard:{self.tg.place('system')}"
                 mid = self.db.get(key)
                 if not (mid and await self.tg.edit_now(int(mid), text, MENU)):
                     res = await self.tg.send_now(text, MENU, topic="system", quiet=True)

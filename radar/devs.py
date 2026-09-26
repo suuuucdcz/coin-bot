@@ -164,12 +164,13 @@ async def early_buyers(rpc: SolanaRPC, mint: str, creator: str | None, n: int = 
 
 
 async def is_generic_bot(rpc: SolanaRPC, address: str) -> bool:
-    """≥ 300 tx en moins de 48 h = bot qui trade tout (sniper générique, market maker)."""
-    sigs = await rpc.signatures(address, limit=300)
-    if len(sigs) < 300:
+    """≥ 150 tx en moins de 24 h = bot qui trade tout (sniper générique, market maker). Vu en vrai : des
+    « acheteurs précoces » à 300 tx / 48 h passaient le filtre et achetaient un token toutes les 10 min."""
+    sigs = await rpc.signatures(address, limit=150)
+    if len(sigs) < 150:
         return False
     times = [s["blockTime"] for s in sigs if s.get("blockTime")]
-    return bool(times) and max(times) - min(times) < 48 * 3600
+    return bool(times) and max(times) - min(times) < 24 * 3600
 
 
 async def expand(pipeline, dev: str, http=None) -> list[Satellite]:
@@ -295,36 +296,44 @@ def rug_flags(pipeline, report: DevReport) -> list[str]:
 
 
 def card(pipeline, report: DevReport, info: TokenInfo | None, title: str) -> tuple[str, dict]:
-    """Fiche du dev pour le sujet 🧬."""
+    """Fiche du dev (section 🧠) : qui, d'où vient l'argent, ses projets, ses satellites, verdict."""
     lines = [f"🧬 <b>FICHE DEV — {title}</b>"]
     if not report.dev:
         lines.append(f"Dev : {esc(report.how)}")
         return "\n".join(lines), buttons()
+    flags = rug_flags(pipeline, report) + ([f for f in info.flags if "réseau" in f] if info else [])
+    lines.append(A.verdict(flags))
     lab = pipeline.label(report.dev)
-    lines.append(f"Dev : <code>{report.dev}</code>" + (f" [{esc(lab)}]" if lab else "") + f"\n<i>({esc(report.how)})</i>")
+    lines += [A.SEP, f"👤 <b>{esc(lab or A.short(report.dev))}</b> · <i>{esc(report.how)}</i>", f"<code>{report.dev}</code>"]
     if report.trace and report.trace.hops:
-        lines.append("Financement : " + esc(chain_text(pipeline, report)))
-        lines.append(f"<i>Arrêt : {esc(report.trace.stop_reason)}</i>")
+        lines.append("💰 " + esc(chain_text(pipeline, report).replace("dev ←", "Argent : dev ⟵").replace(" ← ", " ⟵ ")))
+        lines.append(f"🛑 <i>Remontée arrêtée : {esc(report.trace.stop_reason)}</i>")
     if info:
         d = A.dev_line(info)
         if d:
             lines.append(d)
+        if info.network:
+            lines.append(esc(info.network))
+    lines.append(A.SEP)
     if report.satellites:
-        lines.append(f"\n<b>Satellites ({len(report.satellites)})</b> :")
-        for s in report.satellites[:25]:
-            lab = pipeline.label(s.address)
-            lines.append(f"• <code>{s.address}</code> — {esc(s.role)}" + (f" [{esc(lab)}]" if lab else ""))
+        roles: dict[str, int] = {}
+        for s in report.satellites:
+            k = s.role.split(" (")[0]
+            roles[k] = roles.get(k, 0) + 1
+        lines.append(f"🛰 <b>{len(report.satellites)} satellite(s)</b> : "
+                     + " · ".join(f"{n} {esc(k)}" for k, n in sorted(roles.items(), key=lambda x: -x[1])[:4]))
+        detail = "\n".join(f"• <code>{s.address}</code> — {esc(s.role)}" for s in report.satellites[:25])
         if len(report.satellites) > 25:
-            lines.append(f"… et {len(report.satellites) - 25} autres")
+            detail += f"\n… et {len(report.satellites) - 25} autres"
+        lines.append(f"<blockquote expandable>{detail}</blockquote>")
     else:
-        lines.append("Satellites : aucun trouvé pour l'instant")
-    lines.append(f"\n➕ {report.added} wallet(s) ajouté(s) à la surveillance temps réel")
-    for f in rug_flags(pipeline, report):
-        lines.append(f"🚩 {esc(f)}")
-    links = [("Dev sur Solscan", f"https://solscan.io/account/{report.dev}")]
+        lines.append("🛰 Aucun satellite trouvé pour l'instant")
+    lines.append(f"➕ <i>{report.added} wallet(s) ajouté(s) à la surveillance en direct</i>")
+    lines += A.flags_block(flags)
+    links = [("🕸 Réseau complet", f"n:{report.dev}"), ("👛 Dev sur Solscan", f"https://solscan.io/account/{report.dev}")]
     if info:
-        links.append(("Token", f"https://solscan.io/token/{info.mint}"))
-    return "\n".join(lines), buttons(*links, per_row=2)
+        links.append(("🔍 Token", f"https://solscan.io/token/{info.mint}"))
+    return "\n".join(lines), buttons(*links, per_row=3)
 
 
 def satellites_json(report: DevReport) -> list[dict]:

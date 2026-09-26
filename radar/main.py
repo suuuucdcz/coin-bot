@@ -38,6 +38,24 @@ MUTE_S = 20 * 60             # courte : un bank qui finance 100 relais d'un coup
 BACKFILL_MAX_AGE_S = 30 * 60 # après une coupure, on rattrape les tx de moins de 30 min
 DOWN_ALERT_S = 180           # coupure websocket / PumpPortal signalée sur Telegram après 3 min
 DAILY_REPORT_HOUR = 9        # bilan quotidien (heure de Paris)
+GUIDE_VERSION = "2"
+GUIDE = (
+    "📖 <b>MODE D'EMPLOI — À NE PAS RATER</b>\n"
+    "Ici, tu reçois <b>uniquement</b> les alertes vérifiées, avec le son. Tout le reste (agenda X, clusters, "
+    "fiches dev, arnaques) arrive ailleurs, sans son.\n\n"
+    "🚨 <b>UN DEV SUIVI CRÉE UN TOKEN</b> — un wallet de dev surveillé vient de lancer un token.\n"
+    "🚨 <b>LE DEV / LE CLUSTER ENTRE</b> — le dev ou plusieurs wallets d'un même groupe achètent un token "
+    "tout jeune.\n"
+    "🚨 <b>TRADING OUVERT</b> — un contrat annoncé à l'avance vient de recevoir sa liquidité.\n"
+    "🚨 <b>$XXX ANNONCÉ SUR X EST LANCÉ</b> — le coin annoncé, avec une preuve forte (créé par le dev "
+    "repéré, ou CA publié par le compte officiel).\n\n"
+    "<b>Lire une alerte</b> : verdict (🟢 rien de suspect · 🟡 points à vérifier), 💡 pourquoi, CA, âge, "
+    "market cap, dev, lien X.\n"
+    "<b>Boutons</b> : 📋 Copier le CA (à coller dans ta plateforme) · 📈 GMGN · 📊 DexScreener · "
+    "🔎 Fiche complète · 🧬 Tracer le dev.\n\n"
+    "<b>Jamais ici</b> : les tokens ⛔ (opérateur de rugs) ou 🟠 (signal grave). Ils restent dans le groupe.\n"
+    "⚠️ C'est une alerte, pas un conseil : le radar ne garantit rien, tu décides et tu achètes toi-même."
+)
 
 
 async def amain() -> int:
@@ -52,7 +70,7 @@ async def amain() -> int:
     db.import_labels(cfg.labels_path)
     for w in db.import_warnings:
         log.warning("Données d'entrée : %s", w)
-    tg = Telegram(cfg.telegram_bot_token, cfg.telegram_chat_id, db)
+    tg = Telegram(cfg.telegram_bot_token, cfg.telegram_chat_id, db, cfg.telegram_top_chat_id)
     queue: asyncio.Queue[str] = asyncio.Queue()
     rate: dict[str, deque] = defaultdict(deque)
     muted: dict[str, float] = {}
@@ -61,12 +79,19 @@ async def amain() -> int:
     async with SolanaRPC(cfg.rpc_url) as rpc, aiohttp.ClientSession() as http:
         try:
             await tg.setup_topics()
+            await tg.ensure_headers()
         except Exception as e:
             log.error("Sujets Telegram non créés (%s) : tout arrivera dans la même conversation", e)
         try:
             await tg.setup_profile()
         except Exception as e:
             log.warning("Profil du bot (commandes, description) non mis à jour : %s", e)
+        try:
+            tg.guide = GUIDE
+            if not tg.top_in_group:   # la section ‼️ du groupe n'existe pas encore (bot pas admin) : en privé
+                await tg.post_guide(GUIDE, GUIDE_VERSION)
+        except Exception as e:
+            log.warning("Mode d'emploi non envoyé en privé (écris /start au bot) : %s", e)
         pipeline = Pipeline(cfg, db, rpc, http, tg)
         try:
             await pipeline.detect_mints()
@@ -104,7 +129,10 @@ async def amain() -> int:
                 tg.enqueue(f"🔇 {esc(pipeline.label(addr) or addr)} est trop actif (> {MUTE_PER_MINUTE} tx/min) : "
                            f"mis en sourdine {MUTE_S // 60} min.", kind="mute", topic="system")
                 return
-            db.set_last_sig(addr, sig)
+            try:
+                db.set_last_sig(addr, sig)
+            except Exception as e:  # base momentanément verrouillée : la transaction est quand même analysée
+                log.warning("Point de reprise non enregistré pour %s : %s", addr[:6], e)
             if not pipeline.seen_signature(sig):
                 queue.put_nowait(sig)
 
@@ -131,6 +159,7 @@ async def amain() -> int:
 
         watcher = LogsWatcher(cfg.ws_url, on_signature, backfill)
         pipeline.watcher = watcher
+        await pipeline.purge_services()
         watcher.addresses |= pipeline.watched
 
         async def worker() -> None:
@@ -189,6 +218,7 @@ async def amain() -> int:
             while True:
                 await asyncio.sleep(3600)
                 pipeline.cleanup()
+                await pipeline.purge_services()
                 now = datetime.now(PARIS)
                 jour = now.strftime("%Y-%m-%d")
                 if now.hour < DAILY_REPORT_HOUR or dernier_bilan == jour:
@@ -220,6 +250,7 @@ async def amain() -> int:
                 await asyncio.sleep(cfg.discovery_every_h * 3600)
 
         bot = Bot(cfg, db, tg, pipeline, agenda, watcher, xwatcher, stats)
+        pipeline._spawn(agenda.llm.warm_up())   # IA locale chargée en arrière-plan
         ignores = len(db.active_wallets()) - len(pipeline.watched)
         contrats = ", ".join(esc(pipeline.label(m) or A_short(m)) for m in pipeline.mints)
         pause = f", pause {cfg.x_quiet_hours[0]} h-{cfg.x_quiet_hours[1]} h" if cfg.x_quiet_hours else ""

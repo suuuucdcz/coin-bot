@@ -34,6 +34,7 @@ RETRY_DELAY = 30
 # Compartiments : clé -> (icône, titre, couleur de secours). L'icône doit exister dans
 # getForumTopicIconStickers ; sinon l'emoji est mis devant le titre et la couleur sert d'icône.
 TOPICS = {
+    "top":      ("‼️", "À ne pas rater", 16478047),
     "agenda":   ("📆", "Agenda X — coins annoncés", 7322096),
     "onchain":  ("🔥", "Alertes dev on-chain", 16478047),
     "clusters": ("💸", "Mouvements des clusters", 16766590),
@@ -42,6 +43,45 @@ TOPICS = {
     "fakes":    ("🎭", "Faux coins du jour", 9367192),
     "system":   ("🤖", "État du radar", 7322096),
 }
+# Ce que contient chaque section (épinglé en tête de la section, ou en bas de son message épinglé)
+SECTION_INFO = {
+    "onchain": (
+        "🔥 <b>ALERTES DEV ON-CHAIN</b>\n"
+        "Ce que font <b>en direct</b> les wallets de devs surveillés :\n"
+        "🔴 crée un token · 🟠 achète · 🟣 reçoit de la supply sans payer (préparation) · "
+        "🟢 ajoute la liquidité (trading ouvert) · ⚠️ vend · 🎯 le dev ou son cluster entre dans un token jeune.\n\n"
+        "<b>Lire une alerte</b> : 1. quoi + token · 2. verdict (⛔ à éviter · 🟠 prudence · 🟡 à vérifier · "
+        "🟢 rien de suspect) · 3. qui et combien · 4. le token (CA, âge, MC, dev, 🕸 réseau, X) · 5. les 🚩.\n"
+        "Les alertes vérifiées et propres sont <b>aussi</b> copiées dans ‼️ À ne pas rater."),
+    "clusters": (
+        "💸 <b>MOUVEMENTS DES CLUSTERS</b>\n"
+        "L'argent des groupes de wallets surveillés, <b>avant</b> un lancement :\n"
+        "🟡 un nouveau wallet est financé : souvent le prochain wallet de lancement (il est aussitôt surveillé) · "
+        "🔁 transfert interne · ⚫ profits rapatriés vers le bank (le dernier token vient sans doute d'être rug) · "
+        "🏦 envoi vers un exchange (encaissement).\n"
+        "C'est ici qu'on voit un lancement se préparer, quelques minutes avant la création du token."),
+    "devs": (
+        "🧠 <b>DEVS & SATELLITES</b>\n"
+        "Les fiches des devs : d'où vient leur argent (💰), leurs wallets satellites (🛰), leurs projets passés et "
+        "ce qu'ils sont devenus (🕸 réseau : ✅ succès · 💀 mort · 🪤 rug · ⚡ vidé en moins d'1 min).\n"
+        "🧭 = découverte automatique : devs dont un lancement a vraiment marché (au moins 24 h et encore 25 % "
+        "de l'ATH), ajoutés à la surveillance.\n"
+        "Tape /reseau &lt;adresse&gt; pour la toile complète d'un dev."),
+    "scams": (
+        "🏴‍☠️ <b>ARNAQUES REPÉRÉES</b>\n"
+        "Tout ce que font les opérateurs connus pour rug : cluster Reserve (faux fonds souverains), fermes de "
+        "bots, réseaux à rugs, organisateurs de faux coins.\n"
+        "<b>À signaler, jamais à acheter.</b> Utile pour savoir qui éviter et reconnaître leurs prochains tokens."),
+    "agenda": ("<i>Section 📆 : coins annoncés sur X avant leur lancement. Une fiche par coin, mise à jour en "
+               "direct ; les réponses sous une fiche = son historique (CA publié, dev trouvé, trading ouvert). "
+               "👑 = compte officiel probable, 🟢🟡🔴 = fiabilité du compte.</i>"),
+    "fakes": ("<i>Section 🎭 : copies d'un coin annoncé (bougie puis rug). Si une copie est reliée au dev, "
+              "ses wallets sont suivis pour attraper le vrai lancement.</i>"),
+    "system": ("<i>Section 🤖 : santé du radar. Coupures, clé Helius, session X, reclassements automatiques "
+               "(fermes de bots, snipers), bilan chaque matin à 9 h.</i>"),
+}
+HEADER_VERSION = "1"
+
 # Alertes secondaires : envoyées sans son (les importantes gardent la notification)
 QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes"}
 
@@ -54,6 +94,7 @@ BOT_COMMANDS = [
     ("suivre", "Surveiller un wallet : /suivre <adresse> [nom]"),
     ("retirer", "Arrêter de surveiller : /retirer <adresse>"),
     ("x", "Fiabilité d'un compte X : /x <compte>"),
+    ("reseau", "Toile d'un dev : ses wallets, ses projets, leur sort : /reseau <adresse>"),
     ("watchlist", "Wallets surveillés, par groupe"),
     ("silence", "Alertes sans son : /silence 60 ou /silence off"),
     ("aide", "Toutes les commandes"),
@@ -65,7 +106,7 @@ BOT_DESCRIPTION = (
     "sur X et vérifie les liens (vrai compte, faux coins, rugs).\n\n"
     "Alerte uniquement : aucune clé privée, aucun trading.\n\nTape /aide pour les commandes."
 )
-PROFILE_VERSION = "3"
+PROFILE_VERSION = "4"
 
 
 def esc(text: object) -> str:
@@ -74,9 +115,12 @@ def esc(text: object) -> str:
 
 
 def _button(text: str, value: str) -> dict:
-    """Lien si la valeur est une URL, sinon bouton d'action (callback géré par radar/bot.py)."""
+    """Lien si la valeur est une URL, « copy:<texte> » = bouton qui copie le texte (le CA) d'un clic,
+    sinon bouton d'action (callback géré par radar/bot.py)."""
     if value.startswith(("http://", "https://", "tg://")):
         return {"text": text, "url": value}
+    if value.startswith("copy:"):
+        return {"text": text, "copy_text": {"text": value[5:]}}
     return {"text": text, "callback_data": value[:64]}
 
 
@@ -103,7 +147,7 @@ class TelegramError(RuntimeError):
 
 
 class Telegram:
-    def __init__(self, token: str, chat_id: str, db: DB | None = None):
+    def __init__(self, token: str, chat_id: str, db: DB | None = None, top_chat_id: str | int | None = None):
         if not token or not chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID doivent être remplis dans .env")
         self.token = token
@@ -117,6 +161,10 @@ class Telegram:
         # clé d'alerte -> identifiant du message envoyé (pour compléter une alerte rapide)
         self._sent: OrderedDict[str, asyncio.Future] = OrderedDict()
         self._icons: dict[str, str] | None = None
+        # Conversation « 🎯 À ne pas rater » (en privé avec le bot) : seules les alertes vérifiées, avec le son.
+        # Quand elle existe, le groupe (tout le détail) passe en silencieux.
+        self.top_chat_id = top_chat_id or None
+        self.guide: str | None = None     # mode d'emploi (épinglé dans la section ‼️ quand elle est créée)
         self.silent_until = float((db.get("silent_until") if db else None) or 0)
         self.last_alert_ts = 0.0
         self.sent_count = 0
@@ -168,12 +216,8 @@ class Telegram:
             if self.forum and len(self.threads) == len(TOPICS):
                 continue
             try:
-                avant = set(self.threads)
                 await self.setup_topics()
-                for key in TOPICS:
-                    if key in self.threads and key not in avant:
-                        emoji, name, _c = TOPICS[key]
-                        await self.send_now(f"✅ Compartiment prêt : {emoji} <b>{esc(name)}</b>", topic=key, quiet=True)
+                await self.ensure_headers()
             except Exception as e:
                 log.debug("Vérification des sujets : %s", e)
 
@@ -212,6 +256,36 @@ class Telegram:
             "<i>Je crée les compartiments tout seul dans les 2 min qui suivent.</i>",
             None, None, None, None, None, 0, False))
 
+    def place(self, topic: str) -> str:
+        """Identifiant de l'endroit où vit un message épinglé : groupe + section (change si les sujets
+        apparaissent, pour que le message suivant soit recréé dans la bonne section)."""
+        thread = self.threads.get(topic, 0) if self.forum else 0
+        return f"{self.chat_id}:{thread}"
+
+    async def ensure_headers(self) -> None:
+        """Épingle en tête de chaque section ce qu'elle contient (une fois par version du texte)."""
+        if not self.forum:
+            return
+        for key in ("onchain", "clusters", "devs", "scams"):
+            if key not in self.threads:
+                continue
+            cle = f"header:{self.place(key)}"
+            if self.db and self.db.get(cle) == HEADER_VERSION:
+                continue
+            try:
+                res = await self.send_now(SECTION_INFO[key], topic=key, quiet=True)
+                await self._call("pinChatMessage", {"chat_id": self.chat_id, "message_id": res["result"]["message_id"],
+                                                    "disable_notification": True})
+                if self.db:
+                    self.db.put(cle, HEADER_VERSION)
+            except Exception as e:
+                log.debug("Explication de la section %s non épinglée : %s", key, e)
+
+    @property
+    def top_in_group(self) -> bool:
+        """La section « ‼️ À ne pas rater » existe dans le groupe (bot admin + sujets activés)."""
+        return self.forum and "top" in self.threads
+
     async def _topic_icons(self) -> dict[str, str]:
         """Emoji -> identifiant d'icône de sujet autorisée par Telegram."""
         if self._icons is None:
@@ -237,6 +311,16 @@ class Telegram:
         if self.db:
             self.db.put(f"topic:{self.chat_id}:{key}", tid)
         log.info("Sujet créé : %s", name)
+        if key == "top" and self.guide:
+            # Le mode d'emploi, épinglé en tête de la section « À ne pas rater »
+            try:
+                r = await self._call("sendMessage", {"chat_id": self.chat_id, "message_thread_id": tid,
+                                                     "text": self.guide, "parse_mode": "HTML",
+                                                     "disable_notification": True})
+                await self._call("pinChatMessage", {"chat_id": self.chat_id, "message_id": r["result"]["message_id"],
+                                                    "disable_notification": True})
+            except Exception as e:
+                log.debug("Mode d'emploi non épinglé dans la section : %s", e)
         return tid
 
     # --- envoi / modification ------------------------------------------------------------
@@ -254,7 +338,9 @@ class Telegram:
                        thread_id: int | None = None) -> dict:
         payload = {"chat_id": chat_id or self.chat_id, "text": text, "parse_mode": "HTML",
                    "link_preview_options": {"is_disabled": True}}
-        if quiet or self.silent:
+        # Seules les alertes « À ne pas rater » sonnent : le reste du groupe arrive sans son
+        top_ici = chat_id is None and topic == "top" and self.top_in_group
+        if quiet or self.silent or (chat_id is None and self.top_chat_id and not top_ici):
             payload["disable_notification"] = True
         if reply_markup:
             payload["reply_markup"] = reply_markup
@@ -295,6 +381,32 @@ class Telegram:
                 return True
             log.debug("Modification impossible : %s", e)
             return False
+
+    async def send_document(self, chat_id: str | int, filename: str, data: bytes, caption: str = "",
+                            thread_id: int | None = None, reply_to: int | None = None,
+                            reply_markup: dict | None = None) -> dict:
+        """Envoie un fichier (ex. la toile HTML d'un réseau)."""
+        import json as _json
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        form.add_field("disable_notification", "true")
+        if thread_id:
+            form.add_field("message_thread_id", str(thread_id))
+        if caption:
+            form.add_field("caption", caption[:1024])
+            form.add_field("parse_mode", "HTML")
+        if reply_to:
+            form.add_field("reply_parameters", _json.dumps({"message_id": reply_to, "allow_sending_without_reply": True}))
+        if reply_markup:
+            form.add_field("reply_markup", _json.dumps(reply_markup))
+        form.add_field("document", data, filename=filename, content_type="text/html")
+        url = API.format(token=self.token, method="sendDocument")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
+            async with s.post(url, data=form) as r:
+                res = await r.json(content_type=None)
+        if not res.get("ok"):
+            raise TelegramError("sendDocument", res.get("error_code"), res.get("description"))
+        return res
 
     async def answer_callback(self, callback_id: str, text: str = "", alert: bool = False) -> None:
         try:
@@ -363,6 +475,28 @@ class Telegram:
         self.queue.put_nowait((text, reply_markup, topic, reply_to, on_sent, key, 0, kind in QUIET_KINDS))
         return True
 
+    def enqueue_top(self, text: str, reply_markup: dict | None = None, key: str | None = None) -> bool:
+        """Alerte « 🎯 À ne pas rater » : conversation privée avec le bot (ou sujet ‼️ du groupe), avec le son."""
+        if key and self.db and self.db.alert_already_sent(key):
+            return False
+        if key and self.db:
+            self.db.mark_alert_sent(key, "top")
+        self.queue.put_nowait((text, reply_markup, "__top__", None, None, None, 0, False))
+        return True
+
+    async def post_guide(self, text: str, version: str) -> None:
+        """Mode d'emploi épinglé dans la conversation « À ne pas rater » (une fois par version)."""
+        if not self.top_chat_id or (self.db and self.db.get("guide_version") == version):
+            return
+        res = await self.send_now(text, chat_id=self.top_chat_id, quiet=True)
+        try:
+            await self._call("pinChatMessage", {"chat_id": self.top_chat_id, "message_id": res["result"]["message_id"],
+                                                "disable_notification": True})
+        except TelegramError as e:
+            log.debug("Mode d'emploi non épinglé : %s", e)
+        if self.db:
+            self.db.put("guide_version", version)
+
     async def replace(self, key: str, text: str, reply_markup: dict | None = None, topic: str | None = None) -> None:
         """Remplace le message envoyé sous la clé `key` (alerte rapide complétée après analyse).
 
@@ -383,7 +517,14 @@ class Telegram:
         while True:
             text, markup, topic, reply_to, on_sent, key, essais, quiet = await self.queue.get()
             try:
-                res = await self.send_now(text, markup, topic, reply_to, quiet=quiet)
+                if topic == "__top__" and self.top_in_group:
+                    res = await self.send_now(text, markup, "top")          # section ‼️ du groupe, avec le son
+                elif topic == "__top__" and self.top_chat_id:
+                    res = await self.send_now(text, markup, chat_id=self.top_chat_id)   # repli : en privé
+                elif topic == "__top__":
+                    res = await self.send_now(text, markup, "top")
+                else:
+                    res = await self.send_now(text, markup, topic, reply_to, quiet=quiet)
                 mid = res["result"]["message_id"]
                 self.sent_count += 1
                 if key:

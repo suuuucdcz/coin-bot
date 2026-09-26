@@ -147,6 +147,14 @@ def analyze(tx: dict, watched: set[str]) -> list[Event]:
                 # Tokens ET SOL/wSOL/USDC déposés ensemble dans un AMM = ajout de liquidité.
                 # (Une vente encaissée en wSOL/USDC n'est plus prise pour un ajout de liquidité.)
                 mine.append(Event("lp_add", w, sig, ts, sol=max(0.0, -sol_eff), **common))
+            elif not dex:
+                # Tokens envoyés à un autre wallet sans rien encaisser : déplacement de supply (souvent avant
+                # une vente : vers un exchange ou des wallets relais). Vu en vrai : 2,6 milliards de $PAID déplacés.
+                dest = max(((o, b - a) for (o, mm), (a, b, _d2) in tdeltas.items() if mm == m and o != w and b > a),
+                           key=lambda x: x[1], default=(None, 0))[0]
+                if dest:
+                    common["extra"] = {}
+                    mine.append(Event("supply_out", w, sig, ts, other=dest, **common))
 
         # Ajout de liquidité : les jetons LP reçus dans la même tx ne sont pas un « achat »
         if any(e.kind == "lp_add" for e in mine):

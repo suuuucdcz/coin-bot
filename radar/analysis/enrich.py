@@ -45,6 +45,14 @@ class TokenInfo:
     dev_coins: list[dict] | None = None
     tx_count: int | None = None      # nb de transactions sur le token (plafonné à 1000)
     flags: list[str] = field(default_factory=list)
+    # Indicateurs de rug (vus en vrai sur des dizaines de tokens morts en quelques minutes)
+    ath_usd: float | None = None
+    ath_ts: int | None = None        # heure de l'ATH (quelques secondes après la création = achat groupé)
+    curve_sol: float | None = None   # SOL réellement déposés par des acheteurs dans la bonding curve
+    top10_pct: float | None = None   # part des 10 plus gros détenteurs (hors bonding curve / pool)
+    dev_pct: float | None = None     # part encore détenue par le créateur
+    pumpfun_ok: bool = False         # fiche pump.fun obtenue
+    network: str | None = None       # résumé du réseau du dev (radar/analysis/network.py)
 
     @property
     def crowded(self) -> bool:
@@ -82,6 +90,75 @@ SERIAL_MIN_COINS = 3
 SERIAL_MAX_ATH = 50_000
 
 
+TOP10_MAX_PCT = 35
+DEV_MAX_PCT = 10
+CURVE_MIN_SOL = 2.0
+BUNDLE_ATH_S = 15
+
+
+async def holders(rpc: SolanaRPC, mint: str, supply_raw: int, creator: str | None) -> tuple[float, float] | None:
+    """(part des 10 plus gros détenteurs, part du créateur), hors comptes de programmes (bonding curve, pool)."""
+    comptes = await rpc.token_largest_accounts(mint)
+    if not comptes:
+        return None
+    res = await rpc.call("getMultipleAccounts", [[a["address"] for a in comptes], {"encoding": "jsonParsed"}])
+    par_proprio: dict[str, float] = {}
+    for a, v in zip(comptes, (res or {}).get("value", [])):
+        try:
+            owner = v["data"]["parsed"]["info"]["owner"]
+        except (TypeError, KeyError):
+            continue
+        par_proprio[owner] = par_proprio.get(owner, 0.0) + 100 * int(a["amount"]) / supply_raw
+    if not par_proprio:
+        return None
+    proprios = list(par_proprio)
+    res = await rpc.call("getMultipleAccounts", [proprios, {"encoding": "base64"}])
+    SYSTEM = "11111111111111111111111111111111"
+    humains: dict[str, float] = {}
+    for o, v in zip(proprios, (res or {}).get("value", [])):
+        if v is None or v.get("owner") == SYSTEM:   # wallet normal (pas une bonding curve ni un pool)
+            humains[o] = par_proprio[o]
+    top10 = sum(sorted(humains.values(), reverse=True)[:10])
+    return round(top10, 1), round(humains.get(creator or "", 0.0), 1)
+
+
+def _rug_flags(info: TokenInfo) -> None:
+    """Signaux vus en vrai sur des tokens morts en quelques minutes (fermes de bots, bundles)."""
+    def add(f: str) -> None:
+        if f not in info.flags:
+            info.flags.append(f)
+
+    if info.top10_pct is not None and info.top10_pct >= TOP10_MAX_PCT:
+        add(f"top 10 des détenteurs = {info.top10_pct:.0f} % de la supply (hors bonding curve) : risque de dump")
+    if info.dev_pct is not None and info.dev_pct >= DEV_MAX_PCT:
+        add(f"le dev détient encore {info.dev_pct:.0f} % de la supply")
+    if info.ath_usd and info.mc_usd and info.mc_usd < 0.5 * info.ath_usd and info.created_ts:
+        if info.ath_ts and info.ath_ts - info.created_ts <= BUNDLE_ATH_S:
+            add(f"ATH atteint {max(0, info.ath_ts - info.created_ts)} s après la création puis −"
+                f"{100 * (1 - info.mc_usd / info.ath_usd):.0f} % : achat groupé au lancement puis revente")
+        elif info.age_s is not None and info.age_s < 6 * 3600:
+            add(f"déjà −{100 * (1 - info.mc_usd / info.ath_usd):.0f} % depuis son ATH")
+    if info.on_pump_curve and info.curve_sol is not None and info.curve_sol < CURVE_MIN_SOL \
+            and info.age_s is not None and info.age_s > 180:
+        add(f"presque aucun acheteur réel : {info.curve_sol:.1f} SOL dans la bonding curve après {info.age_s // 60} min")
+
+
+def missing_data(info: TokenInfo) -> list[str]:
+    """Ce qui manque pour juger un token. Sans ces données, il n'est JAMAIS présenté comme sûr."""
+    manque = []
+    if not info.creator:
+        manque.append("créateur inconnu")
+    if info.mc_usd is None:
+        manque.append("market cap inconnue")
+    if info.dev_coins is None:
+        manque.append("historique du dev indisponible")
+    if info.supply_raw and info.top10_pct is None:
+        manque.append("répartition des détenteurs inconnue")
+    if info.mint.endswith("pump") and not info.pumpfun_ok:
+        manque.append("fiche pump.fun indisponible")
+    return manque
+
+
 def _dev_flags(info: TokenInfo) -> None:
     """Presque tous les memecoins finissent à −99 % : un ancien token « mort » ne prouve pas un rug.
     Le drapeau n'est levé que pour un lanceur en série dont AUCUN token n'a jamais décollé."""
@@ -107,6 +184,20 @@ async def _json_meta(http: aiohttp.ClientSession, uri: str | None) -> dict:
     return {}
 
 
+async def _deployer(rpc: SolanaRPC, mint: str) -> str | None:
+    """Payeur de la première transaction réussie du contrat (None si trop d'historique)."""
+    sigs, truncated = await rpc.all_signatures(mint, max_pages=3)
+    if truncated or not sigs:
+        return None
+    for s in reversed(sigs):
+        if s.get("err") is None:
+            tx = await rpc.transaction(s["signature"])
+            if tx:
+                k = tx["transaction"]["message"]["accountKeys"][0]
+                return k["pubkey"] if isinstance(k, dict) else k
+    return None
+
+
 async def _oldest_ts(rpc: SolanaRPC, mint: str) -> int | None:
     """Date de création d'un mint = sa plus ancienne tx (None si trop d'historique = token ancien)."""
     sigs, truncated = await rpc.all_signatures(mint, max_pages=3)
@@ -130,6 +221,14 @@ async def token_info(rpc: SolanaRPC, http: aiohttp.ClientSession, mint: str, cre
             if coins is not None:
                 info.dev_coins = [c for c in coins if c["mint"] != mint]
                 _dev_flags(info)
+        if with_dev_history and info.supply_raw and info.top10_pct is None:
+            try:
+                res = await asyncio.wait_for(holders(rpc, mint, info.supply_raw, info.creator), 10)
+            except Exception:
+                res = None
+            if res:
+                info.top10_pct, info.dev_pct = res
+                _rug_flags(info)
         return info
     info = TokenInfo(mint)
 
@@ -172,6 +271,10 @@ async def token_info(rpc: SolanaRPC, http: aiohttp.ClientSession, mint: str, cre
         info.website = pf.get("website") or info.website
         info.mc_usd = pf.get("mc")
         info.on_pump_curve = not pf.get("complete")
+        info.ath_usd, info.ath_ts, info.curve_sol = pf.get("ath"), pf.get("ath_ts"), pf.get("curve_sol")
+        info.pumpfun_ok = True
+        if pf.get("banned"):
+            info.flags.append("token masqué par pump.fun (signalé)")
 
     if dx:
         info.has_pool = True
@@ -191,14 +294,26 @@ async def token_info(rpc: SolanaRPC, http: aiohttp.ClientSession, mint: str, cre
     if not info.created_ts:
         info.created_ts = await safe(_oldest_ts(rpc, mint))
     info.creator = info.creator or creator_hint
+    if with_dev_history and not info.creator:
+        # Hors pump.fun (vu en vrai : $ASH sur Raydium), pas de fiche avec le créateur : on prend le payeur
+        # de la toute première transaction du contrat
+        info.creator = await safe(_deployer(rpc, mint))
 
     if with_dev_history and info.creator:
         coins = await safe(pumpfun.coins_by_creator(http, info.creator))
         if coins is not None:
             info.dev_coins = [c for c in coins if c["mint"] != mint]
 
+    # Concentration des détenteurs, pour tout token qui fait l'objet d'une alerte (vu en vrai : $ASH, contrat
+    # créé la veille de son lancement, sortait « répartition inconnue » et n'arrivait pas dans ‼️)
+    if with_dev_history and info.supply_raw:
+        res = await safe(holders(rpc, mint, info.supply_raw, info.creator))
+        if res:
+            info.top10_pct, info.dev_pct = res
+
     # Drapeaux rouges
     _dev_flags(info)
+    _rug_flags(info)
     if info.mint_authority:
         info.flags.append("mint authority active (le dev peut imprimer des tokens)")
     if info.freeze_authority:

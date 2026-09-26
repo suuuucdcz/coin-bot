@@ -24,12 +24,63 @@ ZONES = {
     "SGT": "Asia/Singapore", "HKT": "Asia/Hong_Kong", "KST": "Asia/Seoul", "JST": "Asia/Tokyo",
     "IST": "Asia/Kolkata", "WIB": "Asia/Jakarta", "UTC+8": "Asia/Singapore",
 }
-_ZONE_ALT = "|".join(sorted((re.escape(z) for z in ZONES if z != "Z"), key=len, reverse=True))
+# Décalages « UTC+8 », « GMT-5 » (vu en vrai : « GMT+8 6PM–10PM / UTC 10AM–2PM »)
+_OFFSET = r"(?:UTC|GMT)[ ]?[+\-−][ ]?\d{1,2}"
+_ZONE_ALT = _OFFSET + "|" + "|".join(sorted((re.escape(z) for z in ZONES if z != "Z"), key=len, reverse=True))
+# Heure PUIS fuseau, sur la MÊME ligne (vu en vrai : « 10PM » d'une ligne collé au « UTC » de la ligne suivante
+# = 12 h d'erreur sur $SKY)
 TIME_RE = re.compile(
-    rf"(?<![\d:])(\d{{1,2}})(?:[:h.](\d{{2}}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*\(?({_ZONE_ALT})\b\)?", re.I)
+    rf"(?<![\d:])(\d{{1,2}})(?:[:h.](\d{{2}}))?[ \t]*(am|pm|a\.m\.|p\.m\.)?[ \t]*\(?({_ZONE_ALT})\b\)?", re.I)
+# Fuseau PUIS heure (« UTC 10AM », « GMT+8: 18:00 ») : fuseaux en MAJUSCULES seulement (pas « et 10 minutes »)
+ZONE_FIRST_RE = re.compile(
+    rf"(?<![A-Za-z])({_OFFSET}|UTC|GMT|EST|EDT|PST|PDT|CET|CEST|BST|SGT|HKT|KST|JST|WIB)[ \t]*[:\-–]?[ \t]*"
+    rf"(\d{{1,2}})(?:[:h.](\d{{2}}))?[ \t]*(?i:(am|pm))?(?![\d:])")
+
+
+def zone_tz(zone: str):
+    """« UTC », « ET », « GMT+8 », « UTC-5 »… -> fuseau utilisable (None si inconnu)."""
+    z = (zone or "").upper().replace(" ", "").replace("−", "-")
+    m = re.fullmatch(r"(?:UTC|GMT)([+-])(\d{1,2})", z)
+    if m:
+        return timezone(timedelta(hours=int(m.group(2)) * (1 if m.group(1) == "+" else -1)))
+    return ZoneInfo(ZONES[z]) if z in ZONES else None
 TIME_AMPM_RE = re.compile(r"(?<![\d:])(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.I)
 RELATIVE_RE = re.compile(r"\bin\s+(\d{1,3})\s*(h|hrs?|hours?|m|mins?|minutes?)\b", re.I)
 TOMORROW_RE = re.compile(r"\b(tomorrow|tmrw|tmr|demain)\b", re.I)
+
+# Dates écrites (« Saturday 26/09 », « SEPTEMBER 26 », « 26 septembre ») : plus fiables que « tomorrow », dont
+# le sens dépend du moment où le tweet est lu (vu en vrai : $ASH et $SKY décalés d'un jour)
+_MOIS = {}
+for _i, _noms in enumerate(("january jan janvier janv", "february feb février fevrier févr", "march mar mars",
+                            "april apr avril avr", "may mai", "june jun juin", "july jul juillet juil",
+                            "august aug août aout", "september sept sep septembre", "october oct octobre",
+                            "november nov novembre", "december dec décembre decembre déc"), start=1):
+    for _n in _noms.split():
+        _MOIS[_n] = _i
+_MOIS_ALT = "|".join(sorted(map(re.escape, _MOIS), key=len, reverse=True))
+DATE_NUM_RE = re.compile(r"(?<![\d/.:])(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?(?![\d/.:])")
+DATE_MD_RE = re.compile(rf"\b({_MOIS_ALT})\.?[ \t]+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+DATE_DM_RE = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th|er)?[ \t]+({_MOIS_ALT})\b", re.I)
+
+
+def explicit_date(text: str, ref: datetime) -> tuple[int, int] | None:
+    """(mois, jour) écrit dans le tweet, seulement s'il tombe entre 2 jours avant et 14 jours après le tweet."""
+    cands: list[tuple[int, int]] = []
+    for m in DATE_MD_RE.finditer(text):
+        cands.append((_MOIS[m.group(1).lower()], int(m.group(2))))
+    for m in DATE_DM_RE.finditer(text):
+        cands.append((_MOIS[m.group(2).lower()], int(m.group(1))))
+    for m in DATE_NUM_RE.finditer(text):
+        a, b = int(m.group(1)), int(m.group(2))
+        cands += [(b, a), (a, b)]          # jour/mois (Europe) d'abord, puis mois/jour (USA)
+    for mois, jour in cands:
+        try:
+            d = ref.replace(month=mois, day=jour)
+        except ValueError:
+            continue
+        if timedelta(days=-2) <= d - ref <= timedelta(days=14):
+            return mois, jour
+    return None
 
 LAUNCH_RE = re.compile(
     r"\b(launch(?:ing|es|ed)?|goes? live|going live|live (?:at|in|on)|stealth|fair ?launch|countdown|"
@@ -84,8 +135,13 @@ class TweetInfo:
         return bool((self.tickers or self.cas) and (self.launch_words or self.launch_ts))
 
 
-def _at(ref_utc: datetime, zone: str, hour: int, minute: int, tomorrow: bool) -> datetime:
-    tz = ZoneInfo(zone)
+def _at(ref_utc: datetime, zone, hour: int, minute: int, tomorrow: bool,
+        date: tuple[int, int] | None = None) -> datetime:
+    tz = zone if not isinstance(zone, str) else ZoneInfo(zone)
+    if date:
+        # Date écrite dans le tweet : elle prime sur « tomorrow »
+        return ref_utc.astimezone(tz).replace(month=date[0], day=date[1], hour=hour, minute=minute, second=0,
+                                              microsecond=0).astimezone(timezone.utc)
     local_ref = ref_utc.astimezone(tz)
     cand = local_ref.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if tomorrow:
@@ -97,6 +153,7 @@ def _at(ref_utc: datetime, zone: str, hour: int, minute: int, tomorrow: bool) ->
 
 def parse_launch_time(text: str, tweet_time: datetime) -> tuple[int | None, str | None]:
     tomorrow = bool(TOMORROW_RE.search(text))
+    date = explicit_date(text, tweet_time)
     m = TIME_RE.search(text)
     if m:
         h, mi = int(m.group(1)), int(m.group(2) or 0)
@@ -106,8 +163,20 @@ def parse_launch_time(text: str, tweet_time: datetime) -> tuple[int | None, str 
         elif ampm == "am" and h == 12:
             h = 0
         if 0 <= h <= 23 and 0 <= mi <= 59:
-            zone = ZONES[m.group(4).upper()]
-            return int(_at(tweet_time, zone, h, mi, tomorrow).timestamp()), m.group(0).strip()
+            zone = zone_tz(m.group(4))
+            if zone is not None:
+                return int(_at(tweet_time, zone, h, mi, tomorrow, date).timestamp()), m.group(0).strip()
+    m = ZONE_FIRST_RE.search(text)
+    if m:
+        h, mi = int(m.group(2)), int(m.group(3) or 0)
+        ampm = (m.group(4) or "").lower()
+        if ampm == "pm" and h < 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        zone = zone_tz(m.group(1))
+        if zone is not None and 0 <= h <= 23 and 0 <= mi <= 59:
+            return int(_at(tweet_time, zone, h, mi, tomorrow, date).timestamp()), m.group(0).strip()
     m = RELATIVE_RE.search(text)
     if m:
         n, unit = int(m.group(1)), m.group(2).lower()
@@ -119,7 +188,7 @@ def parse_launch_time(text: str, tweet_time: datetime) -> tuple[int | None, str 
         if m.group(3).lower() == "pm" and h < 12:
             h += 12
         if 0 <= h <= 23:
-            return int(_at(tweet_time, "UTC", h, mi, tomorrow).timestamp()), m.group(0).strip() + " (fuseau ?)"
+            return int(_at(tweet_time, "UTC", h, mi, tomorrow, date).timestamp()), m.group(0).strip() + " (fuseau ?)"
     return None, None
 
 
@@ -138,7 +207,8 @@ def ambiguous_times(text: str, tweet_time: datetime) -> list[int]:
     if not 0 <= h <= 23:
         return []
     tomorrow = bool(TOMORROW_RE.search(text))
-    return sorted({int(_at(tweet_time, z, h, mi, tomorrow).timestamp()) for z in AMBIGUOUS_ZONES})
+    date = explicit_date(text, tweet_time)
+    return sorted({int(_at(tweet_time, z, h, mi, tomorrow, date).timestamp()) for z in AMBIGUOUS_ZONES})
 
 
 def parse_tweet(text: str, tweet_time: datetime | None = None, links: list[str] | None = None) -> TweetInfo:

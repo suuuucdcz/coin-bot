@@ -90,6 +90,11 @@ class Config:
     discovery_every_h: int
     typesafe_api_key: str
     telegram_admins: list[int]
+    telegram_top_chat_id: str
+    trade_url: str
+    llm_enabled: bool
+    llm_url: str
+    llm_model: str
 
     @property
     def rpc_url(self) -> str:
@@ -127,7 +132,7 @@ def load() -> Config:
         profit_min_sol=_float("PROFIT_MIN_SOL", 5.0),
         # « reserve-suspect » = devs au schéma des faux fonds souverains repérés par la découverte : toujours inclus
         rug_groups={g.strip() for g in (_env("RUG_GROUPS") or "reserve-cluster").split(",") if g.strip()}
-        | {"reserve-suspect"},
+        | {"reserve-suspect", "faux-coins", "reseau-rugs"},
         watch_max=_int("WATCH_MAX", 300),
         watch_stale_days=_int("WATCH_STALE_DAYS", 10),
         x_quiet_hours=_hours("X_QUIET_HOURS", "3-8"),
@@ -136,6 +141,15 @@ def load() -> Config:
         discovery_every_h=max(1, _int("DISCOVERY_EVERY_H", 6)),
         typesafe_api_key=_env("TYPESAFE_API_KEY"),
         telegram_admins=[int(x) for x in re.findall(r"-?\d+", _env("TELEGRAM_ADMINS"))],
+        # « À ne pas rater » : par défaut la conversation privée avec le 1er admin (ton compte Telegram)
+        telegram_top_chat_id=_env("TELEGRAM_TOP_CHAT_ID")
+        or (re.findall(r"-?\d+", _env("TELEGRAM_ADMINS")) or [""])[0],
+        # Lien direct vers ta plateforme (optionnel), ex. https://…/{mint} : {mint} est remplacé par le CA
+        trade_url=_env("TRADE_URL"),
+        # IA locale (Ollama) : lecture des tweets et choix des recherches X
+        llm_enabled=_bool("LLM_ENABLED", True),
+        llm_url=_env("LLM_URL") or "http://127.0.0.1:11434",
+        llm_model=_env("LLM_MODEL") or "gemma4:e4b",
     )
 
 
