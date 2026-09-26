@@ -6,5 +6,6 @@ __pycache__/
 logs/
 data/radar.db*
 data/x_profile/
+data/session_x_export.json
 data/x_profile_ancien*/
 data/reseaux/

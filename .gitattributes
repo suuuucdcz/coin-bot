@@ -1,0 +1,4 @@
+# Scripts Linux : fins de ligne Unix, sinon bash refuse de les lancer sur le serveur
+*.sh text eol=lf
+# Scripts Windows : fins de ligne Windows
+*.bat text eol=crlf

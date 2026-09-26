@@ -4,6 +4,8 @@ Commandes :
     python -m radar.sources.x_watch login   -> ouvre X pour te connecter une fois (connexion_x.bat)
     python -m radar.sources.x_watch test    -> fait une recherche et affiche les annonces trouvées
     python -m radar.sources.x_watch profil <compte> -> fiche lue par le radar + note de fiabilité
+    python -m radar.sources.x_watch exporter -> (sur le PC) écrit la session X dans data/session_x_export.json
+    python -m radar.sources.x_watch importer -> (sur le serveur) reprend cette session, sans fenêtre à ouvrir
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ log = logging.getLogger("x_watch")
 PARIS = ZoneInfo("Europe/Paris")
 SESSION_MARKER = "session_x.json"   # écrit après une connexion réussie (cookie auth_token présent)
 LOGIN_TIMEOUT_S = 15 * 60
+EXPORT_NAME = "session_x_export.json"   # cookies X : aussi secret qu'un mot de passe (jamais dans git)
 
 
 def has_session(profile_dir: Path) -> bool:
@@ -401,6 +404,61 @@ async def _login() -> int:
     return 0 if await login(cfgmod.load()) else 1
 
 
+def _export_path(cfg: cfgmod.Config) -> Path:
+    return cfg.x_profile_dir.parent / EXPORT_NAME
+
+
+async def export_session(cfg: cfgmod.Config) -> bool:
+    """Sur le PC : copie les cookies X du profil connecté dans un fichier (pour un serveur Linux, où les cookies
+    chiffrés par Windows du profil Edge sont illisibles)."""
+    from playwright.async_api import async_playwright
+    if not has_session(cfg.x_profile_dir):
+        print("❌ Pas de session X sur ce PC : lance d'abord connexion_x.bat.")
+        return False
+    w = XWatcher(cfg, None)  # type: ignore[arg-type]
+    async with async_playwright() as pw:
+        ctx, _page = await w._open(pw, headless=True)
+        cookies = await ctx.cookies(["https://x.com", "https://twitter.com"])
+        await ctx.close()
+    if not any(c["name"] == "auth_token" and c["value"] for c in cookies):
+        print("❌ Session X expirée : relance connexion_x.bat puis recommence.")
+        return False
+    out = _export_path(cfg)
+    out.write_text(json.dumps({"exporte_le": datetime.now(PARIS).isoformat(timespec="seconds"), "cookies": cookies}),
+                   encoding="utf-8")
+    print(f"✅ Session X exportée : {out}")
+    print("⚠️  Ce fichier vaut un mot de passe : copie-le sur TON serveur (scp), puis supprime-le des deux côtés.")
+    return True
+
+
+async def import_session(cfg: cfgmod.Config) -> bool:
+    """Sur le serveur : charge les cookies exportés dans le profil du navigateur et vérifie la connexion."""
+    from playwright.async_api import async_playwright
+    src = _export_path(cfg)
+    if not src.exists():
+        print(f"❌ {src} introuvable : exporte la session sur le PC puis copie le fichier ici.")
+        return False
+    cookies = json.loads(src.read_text(encoding="utf-8")).get("cookies") or []
+    w = XWatcher(cfg, None)  # type: ignore[arg-type]
+    async with async_playwright() as pw:
+        ctx, page = await w._open(pw, headless=True)
+        await ctx.add_cookies(cookies)
+        await page.goto("https://x.com/home", wait_until="domcontentloaded")
+        await asyncio.sleep(6)
+        ok = any(c["name"] == "auth_token" and c["value"] for c in await ctx.cookies("https://x.com")) \
+            and "/login" not in page.url and "/i/flow" not in page.url
+        await ctx.close()
+    if not ok:
+        print("❌ X refuse la session sur ce serveur (déconnexion ou vérification demandée). Reconnecte-toi sur le "
+              "PC, réexporte, et réessaie ; sinon garde la veille X sur le PC (X_ENABLED=0 ici).")
+        return False
+    (cfg.x_profile_dir / SESSION_MARKER).write_text(
+        json.dumps({"connecte_le": datetime.now(PARIS).isoformat(timespec="seconds"), "importe": True}),
+        encoding="utf-8")
+    print("✅ Session X reprise sur le serveur. Supprime maintenant le fichier exporté :", src)
+    return True
+
+
 async def _test() -> int:
     from playwright.async_api import async_playwright
 
@@ -461,6 +519,9 @@ def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "test"
     if cmd == "profil" and len(sys.argv) > 2:
         return asyncio.run(_profil(sys.argv[2]))
+    if cmd in ("exporter", "importer"):
+        fn = export_session if cmd == "exporter" else import_session
+        return 0 if asyncio.run(fn(cfgmod.load())) else 1
     return asyncio.run(_login() if cmd == "login" else _test())
 
 

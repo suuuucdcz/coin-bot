@@ -22,6 +22,11 @@ Radar d'**alertes** Telegram pour les memecoins Solana : il suit des wallets de 
 
 Détails : [GUIDE_DEMARRAGE.md](GUIDE_DEMARRAGE.md) · Cahier des charges : [CLAUDE.md](CLAUDE.md)
 
+## Hébergement gratuit 24 h/24 (serveur Linux)
+
+Oracle Cloud « Always Free » + `bash deploy/installer_serveur.sh` (service système, relance automatique).
+Pas à pas, limites et commandes utiles : [HEBERGEMENT.md](HEBERGEMENT.md).
+
 ## Tests
 
 ```bash
