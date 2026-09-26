@@ -22,7 +22,7 @@ from .bot import MENU, Bot
 from .db import DB
 from .pipeline import Pipeline
 from .sources import pumpportal
-from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background
+from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background, notable_logs
 from .sources.x_watch import XWatcher, has_session
 from .telegram import Telegram, esc
 
@@ -35,7 +35,13 @@ def A_short(a: str) -> str:
 WORKERS = 3                  # transactions analysées en parallèle
 MUTE_PER_MINUTE = 150        # au-delà, l'adresse est mise en sourdine (anti-flood : exchange suivi par erreur)
 MUTE_S = 20 * 60             # courte : un bank qui finance 100 relais d'un coup ne doit pas masquer le lancement
-BACKFILL_MAX_AGE_S = 30 * 60 # après une coupure, on rattrape les tx de moins de 30 min
+NOISY_PER_HOUR = 40          # au-delà : wallet « bavard », seules les tx notables sont téléchargées
+SERVICE_PER_HOUR = 200       # au-delà : même les virements de SOL sont ignorés (distributeur, bot)
+NOISY_KEEP_S = 24 * 3600     # un wallet bavard le reste 24 h (pas 40 tx gaspillées à chaque heure)
+HELIUS_FREE_CREDITS = 1_000_000
+BACKFILL_MAX_AGE_S = 30 * 60
+SHORT_GAP_S = 10 * 60        # coupure courte : on ne rattrape pas les wallets qui dorment depuis 3 jours
+DORMANT_S = 3 * 86400 # après une coupure, on rattrape les tx de moins de 30 min
 DOWN_ALERT_S = 180           # coupure websocket / PumpPortal signalée sur Telegram après 3 min
 DAILY_REPORT_HOUR = 9        # bilan quotidien (heure de Paris)
 GUIDE_VERSION = "2"
@@ -112,11 +118,31 @@ async def amain() -> int:
             await pipeline.on_pumpportal_create(msg)
             await agenda.on_new_token(msg)
 
-        async def on_signature(addr: str, sig: str, err) -> None:
+        heure: dict[str, deque] = defaultdict(deque)
+        bavards: dict[str, float] = {}
+
+        async def on_signature(addr: str, sig: str, err, logs: list | None = None) -> None:
             stats["notifs"] += 1
             if err is not None:
                 return
             now = time.time()
+            dh = heure[addr]
+            dh.append(now)
+            while dh and now - dh[0] > 3600:
+                dh.popleft()
+            if len(dh) > NOISY_PER_HOUR and bavards.get(addr, 0) < now:
+                log.info("%s très actif (%d tx/h) : seules ses créations, pools et virements de SOL sont analysés",
+                         pipeline.label(addr) or addr[:6], len(dh))
+                db.put(f"noisy:{addr}", int(now))
+            if len(dh) > NOISY_PER_HOUR:
+                bavards[addr] = now + NOISY_KEEP_S
+            if bavards.get(addr, 0) > now and not notable_logs(logs, strict=len(dh) > SERVICE_PER_HOUR):
+                stats["filtrées"] = stats.get("filtrées", 0) + 1
+                try:
+                    db.set_last_sig(addr, sig)
+                except Exception:
+                    pass
+                return
             if muted.get(addr, 0) > now:
                 return
             dq = rate[addr]
@@ -138,15 +164,21 @@ async def amain() -> int:
 
         async def backfill() -> None:
             """Après (re)connexion : rattrape les tx récentes manquées pendant la coupure."""
-            n = 0
+            n = sautes = 0
+            courte = watcher.last_gap is not None and watcher.last_gap < SHORT_GAP_S
             for addr in list(watcher.addresses):
+                if courte and time.time() - db.last_activity(addr) > DORMANT_S:
+                    # Vu en vrai : ~10 micro-coupures internet par soirée x 160 wallets = 1 600 crédits Helius
+                    # pour rien. Un wallet endormi depuis 3 jours n'a presque aucune chance d'agir pendant la coupure.
+                    sautes += 1
+                    continue
                 try:
                     last = db.last_sig(addr)
                     sigs = await rpc.signatures(addr, until=last, limit=50) if last else await rpc.signatures(addr, limit=1)
                     if sigs:
-                        db.set_last_sig(addr, sigs[0]["signature"])
-                    if not last:
-                        continue  # premier démarrage : on part de maintenant
+                        db.set_last_sig(addr, sigs[0]["signature"], sigs[0].get("blockTime"))
+                    if not last or bavards.get(addr, 0) > time.time():
+                        continue  # premier démarrage (on part de maintenant) ou wallet très actif (pas de logs à trier)
                     for s in reversed(sigs):
                         if s.get("err") is None and time.time() - (s.get("blockTime") or 0) < BACKFILL_MAX_AGE_S:
                             if not pipeline.seen_signature(s["signature"]):
@@ -154,9 +186,15 @@ async def amain() -> int:
                                 n += 1
                 except Exception as e:
                     log.warning("Rattrapage impossible pour %s : %s", addr[:6], e)
-            if n:
-                log.info("Rattrapage : %d transaction(s) manquée(s) remises en file", n)
+            if n or sautes:
+                log.info("Rattrapage : %d transaction(s) manquée(s) remises en file%s", n,
+                         f" ({sautes} wallets endormis non interrogés, coupure de {int(watcher.last_gap)} s)"
+                         if sautes else "")
 
+        # Wallets déjà repérés bavards dans les dernières 24 h (sinon 40 tx gaspillées après chaque redémarrage)
+        for cle, t in db.settings_like("noisy:"):
+            if time.time() - float(t) < NOISY_KEEP_S:
+                bavards[cle.split(":", 1)[1]] = float(t) + NOISY_KEEP_S
         watcher = LogsWatcher(cfg.ws_url, on_signature, backfill)
         pipeline.watcher = watcher
         await pipeline.purge_services()
@@ -174,12 +212,40 @@ async def amain() -> int:
                     log.exception("Erreur sur la transaction %s", sig)
 
         async def heartbeat() -> None:
+            deja = 0
+            tours = 0
+            prevenu = ""
             while True:
                 await asyncio.sleep(900)
-                log.info("En vie : %d wallets suivis · %d notifications · %d tx analysées · %d alertes · file %d "
-                         "· RPC temps réel %d / arrière-plan %d",
-                         len(watcher.addresses), stats["notifs"], stats["tx"], stats["alertes"], queue.qsize(),
-                         rpc.calls[0], rpc.calls[1])
+                tours += 1
+                total = sum(rpc.by_method.values())
+                mois = time.strftime("%Y-%m")
+                try:
+                    credits = int(db.get(f"rpc_month:{mois}") or 0) + total - deja
+                    db.put(f"rpc_month:{mois}", credits)
+                    deja = total
+                except Exception as e:
+                    log.warning("Compteur Helius non enregistré : %s", e)
+                    credits = int(db.get(f"rpc_month:{mois}") or 0)
+                log.info("En vie : %d wallets suivis · %d notifications · %d tx analysées · %d filtrées · %d alertes "
+                         "· file %d · RPC temps réel %d / arrière-plan %d · Helius ce mois %d crédits",
+                         len(watcher.addresses), stats["notifs"], stats["tx"], stats.get("filtrées", 0),
+                         stats["alertes"], queue.qsize(), rpc.calls[0], rpc.calls[1], credits)
+                if tours % 4 == 0:
+                    log.info("RPC par méthode depuis le démarrage : %s",
+                             ", ".join(f"{m} {n}" for m, n in rpc.by_method.most_common(8)))
+                # Projection sur 30 jours à partir du début réel du comptage (pas du 1er du mois)
+                debut = float(db.get(f"rpc_since:{mois}") or 0)
+                if not debut:
+                    debut = time.time() - 900
+                    db.put(f"rpc_since:{mois}", int(debut))
+                jours = max(0.25, (time.time() - debut) / 86400)
+                projection = credits / jours * 30
+                if projection > 0.9 * HELIUS_FREE_CREDITS and jours >= 1 and prevenu != mois:
+                    prevenu = mois
+                    system(f"⚠️ <b>Quota Helius</b> : {credits:,} crédits utilisés ce mois, projection "
+                           f"{int(projection):,} pour {HELIUS_FREE_CREDITS:,} gratuits.\n"
+                           "Réduis la watchlist (WATCH_MAX) ou retire des wallets très actifs.".replace(",", " "))
 
         def system(text: str) -> None:
             tg.enqueue(text, topic="system")
@@ -241,6 +307,13 @@ async def amain() -> int:
         async def discovery_loop() -> None:
             await asyncio.sleep(120)  # laisse le radar démarrer
             while True:
+                # Heure du dernier passage gardée en base : sinon chaque redémarrage relançait une découverte
+                # complète (des centaines de crédits Helius) au lieu d'attendre la prochaine échéance.
+                attente = float(db.get("discovery_last") or 0) + cfg.discovery_every_h * 3600 - time.time()
+                if attente > 0:
+                    await asyncio.sleep(attente)
+                    continue
+                db.put("discovery_last", int(time.time()))
                 try:
                     texte = discovery.report(await discovery.run_once(pipeline))
                     if texte:

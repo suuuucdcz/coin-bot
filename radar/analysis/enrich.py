@@ -87,6 +87,7 @@ def x_handle(url: str | None) -> str | None:
 
 
 SERIAL_MIN_COINS = 3
+FACTORY_MIN_24H = 3        # 3 tokens ou plus créés par le même wallet en 24 h
 SERIAL_MAX_ATH = 50_000
 
 
@@ -169,6 +170,12 @@ def _dev_flags(info: TokenInfo) -> None:
             f"{SERIAL_MAX_ATH // 1000} k$ d'ATH")
     if len(coins) >= SERIAL_MIN_COINS and morts == len(coins) and best < SERIAL_MAX_ATH and flag not in info.flags:
         info.flags.append(flag)
+    # Usine à tokens (vu en vrai : 6 tokens de chat en 2 h par le même wallet, tous retombés à 3 k$)
+    recents = [c for c in coins if c.get("created") and time.time() - c["created"] < 24 * 3600]
+    usine = f"lanceur en série : {len(recents) + 1} tokens créés en 24 h (usine à tokens)"
+    if len(recents) + 1 >= FACTORY_MIN_24H and not any(f.startswith("lanceur en série : ") and "24 h" in f
+                                                       for f in info.flags):
+        info.flags.append(usine)
 
 
 async def _json_meta(http: aiohttp.ClientSession, uri: str | None) -> dict:

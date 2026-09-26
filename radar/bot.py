@@ -86,7 +86,7 @@ class Bot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("Réception des commandes Telegram : %s (nouvel essai dans 15 s)", e)
+                log.warning("Réception des commandes Telegram : %s (nouvel essai dans 15 s)", str(e) or type(e).__name__)
                 await asyncio.sleep(15)
                 continue
             for u in updates:
@@ -232,6 +232,9 @@ class Bot:
             A.SEP,
             f"🛰 Helius temps réel : {etat(self.watcher.down_since)}",
             f"🔑 Clé Helius : {helius}",
+            f"💳 Crédits Helius ce mois : ~{int(self.db.get('rpc_month:' + time.strftime('%Y-%m')) or 0):,}"
+            .replace(",", " ") + " / 1 000 000 gratuits"
+            + (f" · {self.stats['filtrées']} tx de wallets très actifs non téléchargées" if self.stats.get("filtrées") else ""),
             f"🟣 PumpPortal : {etat(pumpportal.state['down_since'])} · {pumpportal.state['tokens']} tokens vus",
             f"🐦 Veille X : {x}",
             "🧠 IA locale : " + (f"🟢 {esc(self.agenda.llm.model)} · {self.agenda.llm.calls} lectures"

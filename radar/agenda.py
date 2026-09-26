@@ -272,7 +272,7 @@ class Agenda:
         if was_linked:
             lines.append("⚠️ C'est le coin que j'avais relié à l'annonce : liaison annulée.")
         if from_dev:
-            lines.append(f"\n✅ <b>Faux coin DU DEV</b> :")
+            lines.append("\n✅ <b>Faux coin DU DEV</b> :")
             lines += [f" • {esc(p)}" for p in preuves]
             lines.append(f"\n👤 <b>Wallet du dev à traquer</b> : <code>{dev_wallet}</code>")
             if rep.creator and rep.creator != dev_wallet:
@@ -479,6 +479,11 @@ class Agenda:
             if dt and datetime.now(timezone.utc) - dt > timedelta(hours=36):
                 continue
             info = parse_tweet(t.get("text", ""), dt, t.get("links"))
+            if lus >= READ_PER_BATCH and self._worth_reading(t, info) and await self.llm.available():
+                # Quota de lecture atteint : relu au prochain passage plutôt que jugé sur les seules règles
+                # (vu en vrai : une recherche renvoyait 35 tweets, les 23 derniers entraient sans relecture)
+                self.db.unsee_tweet(url)
+                continue
             if lus < READ_PER_BATCH and self._worth_reading(t, info) and await self.llm.available():
                 lus += 1
                 images = await fetch_images(self.p.http, t.get("images") or []) if t.get("images") else []
@@ -487,6 +492,9 @@ class Agenda:
                     t["ai_local"] = lu
                     if not self._merge_reading(info, lu, dt or datetime.now(timezone.utc), t.get("text", "")):
                         log.info("Ignoré (IA locale : %s à %.0f %%) : %s", lu["type"], 100 * lu["confiance"], url)
+                        continue
+                    if self._promo_only(info, lu):
+                        log.info("Ignoré (IA locale : promo d'un tiers sans CA ni heure) : %s", url)
                         continue
             if not info.is_candidate:
                 continue
@@ -503,6 +511,15 @@ class Agenda:
                 await self.upsert(t, info)
             except Exception:
                 log.exception("Annonce non enregistrée : %s", url)
+
+    def _promo_only(self, info, lu: dict) -> bool:
+        """Un caller qui parle d'un token (« I bought $PAID », « my $musebook call », « let me explain $YAP ») n'annonce
+        pas de lancement : sans CA ni heure, il ne crée pas d'entrée dans l'agenda (vu en vrai : 3 entrées fantômes).
+        Il reste ajouté comme source si le coin est déjà à l'agenda."""
+        if lu["type"] != "promo_tiers" or lu["confiance"] < 0.85 or info.cas or info.launch_ts:
+            return False
+        ticker = info.tickers[0] if info.tickers else None
+        return not (ticker and self.db.find_announcement(ticker, None, int(time.time()) - MATCH_WINDOW_S))
 
     async def upsert(self, t: dict, info) -> None:
         ticker = info.tickers[0] if info.tickers else None
@@ -935,10 +952,15 @@ class Agenda:
 
         meta_twitter = lien X brut des métadonnées du token (profil, tweet ou communauté).
         """
-        seen = self._seen_mints.setdefault(ann["id"], set())
+        seen = self._seen_mints.get(ann["id"])
+        if seen is None:
+            # Gardé en base : sinon chaque redémarrage réévaluait tous les tokens du même ticker (vu en vrai :
+            # 18 vieux $STARTUP / $HOTEL / $DOG revérifiés à chaque relance, ~100 crédits Helius à chaque fois)
+            seen = self._seen_mints[ann["id"]] = set(json.loads(self.db.get(f"ann_seen:{ann['id']}") or "[]"))
         if mint in seen:
             return  # déjà évalué (DexScreener repasse toutes les 90 s)
         seen.add(mint)
+        self.db.put(f"ann_seen:{ann['id']}", json.dumps(sorted(seen)))
         if ann["ca"] and ann["ca"] != mint:
             # L'annonce est déjà reliée à un contrat : un autre token du même ticker est une copie
             self._copies[ann["id"]] = self._copies.get(ann["id"], 0) + 1
@@ -1013,17 +1035,17 @@ class Agenda:
         self._dirty = True
         await self.update_card(ann["id"])
         await self._notify_real(ann, mint, creator)
-        if ev.level == "fort" and hasattr(self.tg, "enqueue_top"):
-            # Coin annoncé sur X ET lien vérifié : c'est une alerte « à ne pas rater » (si rien de grave)
+        if ev.level == "fort" and not getattr(self.p, "dry_run", False) and hasattr(self.tg, "enqueue_top"):
+            # Coin annoncé sur X ET lien vérifié : candidat « à ne pas rater ». Même contrôle que les alertes
+            # on-chain (drapeaux graves, drapeaux de l'annonce, données complètes, âge), plus de chemin à part.
             try:
+                from .pipeline import Alert
                 info = await token_info(self.p.rpc, self.p.http, mint, creator)
-                flags = list(info.flags) + self.p.rug_flags(creator)
-                if A.is_safe(flags):
-                    preuve = (ev.strong or ["lien vérifié"])[0]
-                    self.tg.enqueue_top(
-                        A.top_card(info, f"${ann['ticker']} ANNONCÉ SUR X EST LANCÉ",
-                                   f"Annoncé par <b>@{esc(official)}</b> · ✅ {esc(preuve)}", flags),
-                        A.top_buttons(info, getattr(self.p.cfg, "trade_url", "")), key=f"top:match:{mint}")
+                preuve = (ev.strong or ["lien vérifié"])[0]
+                self.p._emit_top(Alert(f"match:{mint}", "match", "", None,
+                                       top_title=f"${ann['ticker']} ANNONCÉ SUR X EST LANCÉ",
+                                       top_why=f"Annoncé par <b>@{esc(official)}</b> · ✅ {esc(preuve)}",
+                                       info=info, flags=self.p.rug_flags(creator)))
             except Exception:
                 log.exception("Alerte « à ne pas rater » impossible pour %s", mint)
         self.p._spawn(self.resolve(ann["id"]))

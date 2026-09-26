@@ -159,3 +159,23 @@ def test_section_du_groupe_des_que_le_bot_est_admin(tmp_path, monkeypatch):
     assert detail["message_thread_id"] == 8 and detail["disable_notification"] is True     # sans son
     assert top["chat_id"] == "-100123" and top["message_thread_id"] == 7 and "disable_notification" not in top
     db.close()
+
+
+def test_drapeau_de_l_annonce_bloque_a_ne_pas_rater(setup):
+    # Coin annoncé par un compte X racheté : même un dev prouvé ne l'envoie pas dans ‼️
+    db, tg = setup
+    import json
+    db.insert_announcement(ticker="ASH", handle="AshbornCoin", tweet_url="u", ca=MINT, status="annoncé",
+                           flags=json.dumps(["@AshbornCoin : a changé de nom d'utilisateur 20 fois : compte racheté "
+                                             "ou recyclé ?"]))
+    creer(db, tg, "découverte")
+    assert tg.top == []
+
+
+def test_drapeau_leger_de_l_annonce_affiche_dans_a_ne_pas_rater(setup):
+    db, tg = setup
+    import json
+    db.insert_announcement(ticker="ASH", handle="AshbornCoin", tweet_url="u", ca=MINT, status="annoncé",
+                           flags=json.dumps(["@AshbornCoin : très peu d'abonnés (226)"]))
+    creer(db, tg, "découverte")
+    assert len(tg.top) == 1 and "très peu d'abonnés (226)" in tg.top[0][0]

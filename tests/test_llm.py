@@ -108,3 +108,18 @@ def test_heure_du_texte_verifiee():
     Agenda._merge_reading(info, clean_reading(lu(ticker="SKY", heure="10:00", fuseau="UTC")), REF,
                           "$SKY launches tomorrow, see banner")
     assert info.launch_ts is None          # heure absente du texte et pas lue sur une image : ignorée
+
+
+def test_promo_d_un_tiers_sans_ca_ni_heure_ne_cree_pas_d_annonce(tmp_path):
+    # Vu en vrai : « I bought $PAID on the 23rd… », « my $musebook call… » entraient dans l'agenda
+    from radar.db import DB
+    ag = Agenda.__new__(Agenda)
+    ag.db = DB(tmp_path / "radar.db")
+    promo = clean_reading(lu(type="promo_tiers", confiance=1.0, ticker="PAID"))
+    assert ag._promo_only(parse_tweet("I bought $PAID on the 23rd because everyone uses it", REF), promo)
+    # avec une heure de lancement ou un CA, un caller apporte une vraie information : gardé
+    assert not ag._promo_only(parse_tweet("$PAID launches 18:00 UTC", REF), promo)
+    assert not ag._promo_only(parse_tweet(f"$PAID CA {MINT}", REF), promo)
+    # coin déjà à l'agenda : la promo devient une source de plus
+    ag.db.insert_announcement(ticker="PAID", handle="UsePaid", tweet_url="u", status="annoncé")
+    assert not ag._promo_only(parse_tweet("I bought $PAID", REF), promo)

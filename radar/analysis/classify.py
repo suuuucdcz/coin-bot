@@ -18,6 +18,8 @@ from ..sources.helius import (AMM_PROGRAMS, IGNORED_MINTS, PUMP_FUN, SIMPLE_TRAN
 MIN_TRADE_SOL = 0.005     # en dessous : frais / loyer de compte, pas un achat
 MIN_TRANSFER_SOL = 0.01   # en dessous : dust / address poisoning
 MIN_TRADE_USD = 1.0       # paiement en USDC / USDT
+POOL_DEXES = {"Raydium AMM", "Raydium CPMM", "Raydium CLMM", "PumpSwap", "Meteora DLMM", "Meteora",
+              "Meteora DAMM v2", "Orca"}
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
 
 
@@ -66,6 +68,18 @@ def created_mints(tx: dict) -> list[str]:
     return out
 
 
+def mint_authorities(tx: dict) -> dict[str, str | None]:
+    """{mint créé dans la tx: son autorité de mint}."""
+    out: dict[str, str | None] = {}
+    for ix in _all_instructions(tx):
+        p = ix.get("parsed")
+        if isinstance(p, dict) and p.get("type") in ("initializeMint", "initializeMint2"):
+            info = p.get("info", {})
+            if info.get("mint"):
+                out[info["mint"]] = info.get("mintAuthority")
+    return out
+
+
 def signers(tx: dict) -> set[str]:
     keys = tx["transaction"]["message"]["accountKeys"]
     return {k["pubkey"] for k in keys if isinstance(k, dict) and k.get("signer")}
@@ -103,6 +117,13 @@ def analyze(tx: dict, watched: set[str]) -> list[Event]:
         dex = "pump.fun"
     sgn = signers(tx)
     mints_created = created_mints(tx)
+    if dex in POOL_DEXES:
+        # Création d'un pool (Raydium, PumpSwap, Meteora, Orca) : le mint créé est le jeton LP, pas un nouveau
+        # token (vu en vrai : le pool de $ASH a donné un faux « DEV CRÉE UN TOKEN »). On le reconnaît à son
+        # autorité de mint : le pool, pas un signataire. Un token créé par le dev dans la même tx reste compté,
+        # comme ceux des launchpads (pump.fun, LaunchLab).
+        auth = mint_authorities(tx)
+        mints_created = [m for m in mints_created if auth.get(m) in sgn]
     real_token_moves = any(m not in IGNORED_MINTS and pre != post for (_o, m), (pre, post, _d) in tdeltas.items())
     plain_sol_move = (top_level_programs(tx) <= SIMPLE_TRANSFER_PROGRAMS | TOKEN_PROGRAMS
                       and not real_token_moves and not mints_created)

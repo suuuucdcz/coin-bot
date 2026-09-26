@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from collections import Counter, OrderedDict, defaultdict
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 import aiohttp
@@ -24,6 +25,7 @@ from .telegram import Telegram, esc
 
 log = logging.getLogger("pipeline")
 
+TOP_KINDS = ("create", "cluster", "lp_add", "match")   # alertes qui peuvent aller dans « ‼️ À ne pas rater »
 YOUNG_TOKEN_S = 24 * 3600      # « mint jeune » = moins de 24 h
 NEW_WALLET_MAX_TX = 5          # un wallet avec moins de 5 tx = nouveau wallet
 SUPPLY_IN_MIN_PCT = 1.0        # réception de supply significative
@@ -79,13 +81,17 @@ def is_upstream_role(role: str | None) -> bool:
 FARM_WINDOW_S = 6 * 3600
 FARM_MIN_TOKENS = 4          # un groupe qui « entre » dans 4 tokens différents en 6 h = ferme de bots
 SNIPER_MIN_TOKENS = 5        # un wallet qui achète 5 tokens différents en 6 h = sniper
+FUNDED_MAX_24H = 12          # au-delà, un financeur est un distributeur : ses nouveaux wallets ne sont plus ajoutés
+FACTORY_FLAG_24H = 3         # 3 tokens créés en 24 h : signal grave (lanceur en série)
+FACTORY_UNWATCH_24H = 5      # 5 tokens créés en 24 h : usine / plateforme de lancement, plus un dev à suivre
 SUPPLY_OUT_MIN_PCT = 1.0     # déplacement de supply signalé au-delà de 1 % de la supply
 TOP_RETRY_S = (60, 180)      # alerte « à ne pas rater » retentée quand seules des données manquaient
 INDEPENDENT_GROUPS = {"découverte", "manuel"}   # wallets rassemblés par le radar, sans lien entre eux
 TRUSTED = ("référence", "prouvé", "lié")
 
 
-def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | frozenset = frozenset()) -> str:
+def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | frozenset = frozenset(),
+                 parent_role: str | None = None) -> str:
     """Confiance dans un wallet suivi, selon COMMENT il a été trouvé.
 
     référence : watchlist de départ (hors cluster de rugs) · prouvé : dev d'un vrai succès (vérifié
@@ -111,6 +117,10 @@ def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | fr
         return "lié"
     if r.startswith(("bank probable", "financé par")) and parent_trust in ("référence", "prouvé"):
         return "lié"
+    if r.startswith("financé par") and parent_trust == "lié" and (parent_role or "").lower().startswith("bank probable"):
+        # Nouveau wallet financé par le bank d'un dev à succès : c'est LE scénario suivi (le dev relance avec un
+        # wallet neuf). Vu à la relecture : il retombait « faible », donc sa création n'allait jamais dans ‼️.
+        return "lié"
     return "faible"
 
 
@@ -126,7 +136,11 @@ def watch_priority(role: str | None, depth: int) -> int:
 
 def is_service(row, label: str | None) -> bool:
     txt = f"{row['role'] if row else ''} {label or ''}".lower()
-    return any(k in txt for k in ("hot wallet", "cex", "exchange"))
+    return any(k in txt for k in ("hot wallet", "cex", "exchange", "usine à tokens"))
+
+
+# Raison notée pour l'événement en cours (chaque événement est traité dans sa propre tâche asyncio)
+_SKIPPED: ContextVar[list | None] = ContextVar("skipped", default=None)
 
 
 class Pipeline:
@@ -220,6 +234,40 @@ class Pipeline:
     def is_sniper(self, address: str) -> bool:
         return bool(self.db.get(f"sniper:{address}"))
 
+    def creations_24h(self, wallet: str, mint: str | None = None) -> int:
+        """Tokens distincts créés par ce wallet en 24 h (mémoire du radar + table des tokens)."""
+        now = int(time.time())
+        cle = f"creates:{wallet}"
+        vus = {m: t for m, t in json.loads(self.db.get(cle) or "{}").items() if now - t < 24 * 3600}
+        for r in self.db.conn.execute("SELECT mint, COALESCE(created_at, first_seen) AS t FROM tokens "
+                                      "WHERE creator=? AND COALESCE(created_at, first_seen) > ?",
+                                      (wallet, now - 24 * 3600)):
+            vus.setdefault(r["mint"], r["t"])
+        if mint:
+            vus.setdefault(mint, now)
+            self.db.put(cle, json.dumps(vus))
+        return len(vus)
+
+    async def _factory_check(self, ev: Event) -> tuple[bool, list[str]]:
+        """Usine à tokens (vu en vrai : le wallet de la plateforme startup.fun créait un token de chat toutes les
+        10 à 20 min : 3 alertes inutiles à chaque fois). Renvoie (à retirer, drapeaux)."""
+        n = self.creations_24h(ev.wallet, ev.mint)
+        flags = ([f"lanceur en série : {n} tokens créés en 24 h (usine à tokens)"]
+                 if n >= FACTORY_FLAG_24H else [])
+        w = self.db.wallet(ev.wallet)
+        if n < FACTORY_UNWATCH_24H or self.dry_run or not w or w["depth"] == 0:
+            return False, flags  # la watchlist de départ n'est jamais retirée automatiquement
+        nom = w["label"] or A.short(ev.wallet)
+        self.db.put(f"factory:{ev.wallet}", int(time.time()))
+        self.db.set_label(ev.wallet, f"usine à tokens ({n} créations en 24 h)")
+        await self.unwatch([ev.wallet])
+        log.warning("%s reclassé usine à tokens (%d créations en 24 h) : retiré de la surveillance", nom, n)
+        self.emit(Alert(f"factory:{ev.wallet}", "system",
+                        f"🏭 <b>{esc(nom)} reclassé : usine à tokens</b>\n"
+                        f"{n} tokens créés en 24 h : c'est une plateforme de lancement ou un lanceur en série, "
+                        f"pas un dev qui prépare UN projet. Retiré de la surveillance.\n<code>{ev.wallet}</code>"))
+        return True, flags
+
     async def _sniper_check(self, ev: Event) -> bool:
         """Un wallet suivi qui achète 5 tokens différents en 6 h n'est pas un satellite : c'est un sniper
         (vu en vrai : 2 « acheteurs précoces » achetaient un nouveau token toutes les 10 minutes)."""
@@ -250,8 +298,10 @@ class Pipeline:
             return "faible"
         bad = self.bad_groups()
         parent = self.db.wallet(row["parent"]) if row["parent"] else None
-        parent_trust = wallet_trust(parent, None, bad) if parent is not None else None
-        return wallet_trust(row, parent_trust, bad)
+        grand = self.db.wallet(parent["parent"]) if parent is not None and parent["parent"] else None
+        grand_trust = wallet_trust(grand, None, bad) if grand is not None else None
+        parent_trust = wallet_trust(parent, grand_trust, bad) if parent is not None else None
+        return wallet_trust(row, parent_trust, bad, parent["role"] if parent is not None else None)
 
     def _farm_check(self, grp: str, mint: str) -> bool:
         """Mémorise les tokens où le groupe « entre ». Trop de tokens différents = ferme de bots."""
@@ -422,9 +472,19 @@ class Pipeline:
         finally:
             self._inflight.discard(akey)
 
+    def _known_old(self, mint: str | None) -> bool:
+        """Token déjà connu comme vieux (plus de 24 h) : un token vieux le reste, inutile de le réanalyser
+        (vu en vrai : un wallet rachetait le même vieux token toutes les 9 min, analyse complète à chaque fois)."""
+        tok = self.db.token(mint) if mint else None
+        return bool(tok and tok["created_at"] and time.time() - tok["created_at"] > YOUNG_TOKEN_S)
+
     async def _cluster_alert(self, ev: Event, grp: str, is_dev: bool, entries: dict[str, float], akey: str) -> None:
+        if self._known_old(ev.mint):
+            return
         info = await self._info(ev.mint, dev=True)
         if info.age_s is not None and info.age_s > YOUNG_TOKEN_S:
+            if info.created_ts:
+                self.db.upsert_token(ev.mint, info.symbol, info.name, info.creator, info.created_ts)
             return  # achat d'un vieux token : pas un lancement
         if info.crowded:
             return  # déjà lancé et callé (beaucoup de monde dessus) : trop tard, inutile
@@ -479,7 +539,14 @@ class Pipeline:
                              f"{TRADE_MUTE_S // 3600} h.\n<i>Créations de token et fundings restent signalés.</i>",
                              A.wallet_buttons(ev.wallet, trace=ev.wallet))
         handler = getattr(self, f"_on_{ev.kind}")
-        alert = await handler(ev)
+        note = _SKIPPED.set([])
+        try:
+            alert = await handler(ev)
+            if alert is None and not _SKIPPED.get():
+                # Aucune raison notée par le handler : on le dit quand même (journal complet, rien de silencieux)
+                self._skip(f"{ev.kind} sans signal")
+        finally:
+            _SKIPPED.reset(note)
         if alert and ev.kind in TRADE_KINDS:
             self._trades[ev.wallet].append(now)
         return alert
@@ -541,19 +608,24 @@ class Pipeline:
             return None  # déjà signalé (Helius et PumpPortal peuvent voir la même création)
         self._inflight.add(key)
         try:
-            if not self._quick(key, "create", "🔴 <b>DEV CRÉE UN TOKEN", ev, self.rug_flags(ev.wallet)):
+            retire, usine = await self._factory_check(ev)
+            if retire:
+                return self._skip("création d'une usine à tokens")
+            if not self._quick(key, "create", "🔴 <b>DEV CRÉE UN TOKEN", ev, self.rug_flags(ev.wallet) + usine):
                 return None
-            return await self._create_alert(ev, key)
+            return await self._create_alert(ev, key, usine)
         finally:
             self._inflight.discard(key)
 
-    async def _create_alert(self, ev: Event, key: str) -> Alert:
+    async def _create_alert(self, ev: Event, key: str, usine: list[str] | None = None) -> Alert:
         info = await self._info(ev.mint, ev.wallet)
         info.creator = info.creator or ev.wallet
         info.created_ts = info.created_ts or ev.ts
         self.db.upsert_token(ev.mint, info.symbol, info.name, ev.wallet, ev.ts)
         head = [self._head(ev)]
         flags = self.rug_flags(ev.wallet)
+        if usine and not any("créés en 24 h" in f for f in info.flags):
+            flags += usine
         if ev.tokens_raw:
             head.append(f"💰 Achat initial : <b>{ev.sol:.2f} SOL</b> → {self._amount(info, ev)}")
             pct = info.pct_supply(ev.tokens_raw)
@@ -598,9 +670,13 @@ class Pipeline:
         key = f"buy:{ev.wallet}:{ev.mint}"
         if self.already(key):
             return None
+        if self._known_old(ev.mint):
+            return self._skip("achat d'un token ancien")  # déjà vu vieux : aucun appel réseau
         info = await self._info(ev.mint)
         if info.age_s is None or info.age_s > YOUNG_TOKEN_S:
             log.info("Achat ignoré (token ancien ou âge inconnu) : %s", ev.mint)
+            if info.created_ts:
+                self.db.upsert_token(ev.mint, info.symbol, info.name, info.creator, info.created_ts)
             return self._skip("achat d'un token ancien")
         if info.crowded:
             log.info("Achat ignoré (déjà lancé et callé, %s tx) : %s", info.tx_count, ev.mint)
@@ -706,12 +782,16 @@ class Pipeline:
         key = f"sell:{ev.wallet}:{ev.mint}"
         if self.already(key):
             return None
+        tok = self.db.token(ev.mint)
+        if tok is None and not self.label(ev.mint) and not self.db.find_announcement(None, ev.mint, 0):
+            # Seules les ventes d'un token SUIVI comptent (créé / acheté jeune / annoncé) : sinon chaque revente
+            # d'un bot ou d'un satellite coûtait une analyse complète du token (crédits Helius) pour rien.
+            return self._skip("vente d'un token non suivi")
         info = await self._info(ev.mint, dev=False)
         pre_pct = info.pct_supply(ev.pre_tokens_raw) or 0.0
-        tok = self.db.token(ev.mint)
         is_creator = ev.wallet in (info.creator, tok["creator"] if tok else None)
         if pre_pct < RESERVE_MIN_PCT and not is_creator:
-            return None
+            return self._skip("petite vente (moins de 10 % de la supply)")
         titre = "LE DEV VEND" if is_creator else "UN WALLET DE RÉSERVE VEND"
         head = [self._head(ev), f"📉 Vend {self._amount(info, ev)} (détenait {pre_pct:.1f} %) "
                                 f"contre <b>{ev.sol:.2f} SOL</b>"]
@@ -726,10 +806,14 @@ class Pipeline:
         if dst_row and not dst_row["active"] and ev.sol >= self.cfg.funding_min_sol:
             # Wallet mis en veille (inactif) qui reçoit de nouveau des fonds : les devs réutilisent
             # souvent un ancien wallet. On le réveille et on prévient.
+            if self.is_sniper(dst) or self.db.get(f"factory:{dst}") or is_service(dst_row, self.db.get_label(dst)):
+                return self._skip("wallet écarté (sniper, usine, service) refinancé")  # retiré exprès : il reste retiré
             key = f"wake:{ev.signature}:{dst}"
             if self.already(key):
                 return None
-            await self.watch(dst, dst_row["label"], dst_row["grp"], dst_row["role"], dst_row["depth"], dst_row["parent"])
+            if not await self.watch(dst, dst_row["label"], dst_row["grp"], dst_row["role"], dst_row["depth"],
+                                    dst_row["parent"]):
+                return self._skip("wallet en veille refinancé, non réactivé (watchlist pleine ou profondeur max)")
             txt = (f"🟡 <b>WALLET EN VEILLE REFINANCÉ</b> · <b>{ev.sol:g} SOL</b>\n"
                    f"{esc(self.label(src) or A.short(src))} ➜ <b>{esc(dst_row['label'] or A.short(dst))}</b>\n"
                    f"<code>{dst}</code>\n<i>Il était inactif : il est de nouveau surveillé (prochain lancement ?).</i>")
@@ -774,6 +858,14 @@ class Pipeline:
         key = f"fund:{src}:{dst}"
         if self.already(key):
             return None
+        finances = self.db.conn.execute("SELECT COUNT(*) FROM wallets WHERE parent=? AND added_at > ?",
+                                        (src, int(time.time()) - 86400)).fetchone()[0]
+        if finances >= FUNDED_MAX_24H:
+            # Vu en vrai : un distributeur (plateforme de lancement) finançait des dizaines de wallets par jour,
+            # tous ajoutés à la watchlist. Au-delà de 12 en 24 h, ce n'est plus un dev qui prépare ses wallets.
+            if not self.dry_run:
+                self.db.mark_alert_sent(key, "funding")
+            return self._skip("financeur en série : nouveaux wallets non ajoutés")
         nb = len(await self.rpc.signatures(dst, limit=NEW_WALLET_MAX_TX + 1))
         if nb >= NEW_WALLET_MAX_TX:
             return self._skip("paiement vers un wallet existant")  # pas un nouveau dev
@@ -851,10 +943,22 @@ class Pipeline:
     # --- envoi ------------------------------------------------------------------------
     def _emit_top(self, alert: Alert) -> None:
         """Copie courte dans « 🎯 À ne pas rater » si le signal est vérifié et sans drapeau grave."""
-        if not (alert.top_title and alert.info and self.tg and not self.dry_run):
+        if not (alert.info and self.tg and not self.dry_run) or alert.kind not in TOP_KINDS:
             return
-        flags = list(alert.info.flags) + list(alert.flags or [])
+        mint = alert.info.mint
+        if not alert.top_title:
+            log.info("Pas « à ne pas rater » (wallet pas de confiance : satellite, lointain ou à éviter) : %s", mint)
+            self._skip("pas « à ne pas rater » : wallet pas de confiance")
+            return
+        # Drapeaux de l'annonce X reliée à ce contrat (arnaque, abonnés achetés, compte racheté, imitation…) :
+        # ils n'étaient pas pris en compte (vu à la relecture : un coin annoncé par un compte racheté pouvait
+        # arriver dans ‼️ dès l'ouverture du trading).
+        annonce = self._announcement_flags(mint)
+        flags = list(alert.info.flags) + list(alert.flags or []) + annonce
         if not A.is_safe(flags):
+            grave = next((f for f in flags if A.RUG_MARK in f or any(s in f.lower() for s in A.SEVERE)), "?")
+            log.info("Pas « à ne pas rater » (signal grave : %s) : %s", grave[:90], mint)
+            self._skip("pas « à ne pas rater » : signal grave")
             return  # ⛔ / 🟠 : reste dans le groupe, jamais dans les alertes « à ne pas rater »
         manque = missing_data(alert.info)
         if manque:
@@ -864,13 +968,23 @@ class Pipeline:
                      alert.info.mint)
             if not getattr(alert, "retried", False):
                 self._spawn(self._retry_top(alert))
-            return
+            return self._skip("pas « à ne pas rater » pour l'instant : données incomplètes")
         if alert.info.age_s is not None and alert.info.age_s > 6 * 3600:
-            return  # plus un lancement
-        text = A.top_card(alert.info, alert.top_title, alert.top_why, list(alert.flags or []))
+            log.info("Pas « à ne pas rater » (token de plus de 6 h, plus un lancement) : %s", mint)
+            return self._skip("pas « à ne pas rater » : token trop vieux")
+        text = A.top_card(alert.info, alert.top_title, alert.top_why, list(alert.flags or []) + annonce)
         if self.tg.enqueue_top(text, A.top_buttons(alert.info, getattr(self.cfg, "trade_url", "")),
                                key=f"top:{alert.kind}:{alert.info.mint}"):
             log.info("🎯 À ne pas rater : %s %s", alert.kind, alert.info.mint)
+
+    def _announcement_flags(self, mint: str) -> list[str]:
+        ann = self.db.find_announcement(None, mint, 0)
+        if not ann or ann["ca"] != mint:
+            return []
+        try:
+            return [str(f) for f in json.loads(ann["flags"] or "[]")]
+        except ValueError:
+            return []
 
     async def _retry_top(self, alert: Alert) -> None:
         """Relit le token après 1 puis 3 min : s'il est maintenant complet et propre, il part dans ‼️."""
@@ -889,6 +1003,9 @@ class Pipeline:
     def _skip(self, raison: str) -> None:
         """Note pourquoi un événement n'a pas donné d'alerte (visible dans /statut et le journal)."""
         self.decisions[raison] += 1
+        vu = _SKIPPED.get()
+        if vu is not None:
+            vu.append(raison)
         return None
 
     def emit(self, alert: Alert) -> bool:
@@ -904,6 +1021,9 @@ class Pipeline:
             if self.tg.enqueue(alert.text, alert.markup, alert.key, alert.kind, topic=alert.topic):
                 log.info("Alerte %s -> %s : %s", alert.kind, alert.topic, alert.key)
                 self.decisions[f"alerte {alert.kind}"] += 1
+                vu = _SKIPPED.get()
+                if vu is not None:
+                    vu.append("alerte")
                 return True
             return False
         print("\n" + re.sub(r"</?(b|i|code|a)\b[^>]*>", "", alert.text) + "\n")

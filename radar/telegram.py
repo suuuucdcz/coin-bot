@@ -140,6 +140,25 @@ def strip_html(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
+TG_MAX = 4096
+
+
+def _tg_len(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2   # Telegram compte en UTF-16 : un emoji vaut 2
+
+
+def fit(text: str) -> tuple[str, str | None]:
+    """(texte, parse_mode) prêt pour Telegram. La limite de 4096 porte sur le texte VISIBLE : un message riche en
+    liens reste en HTML s'il tient ; sinon texte brut coupé proprement (jamais au milieu d'une balise, ce qui
+    faisait refuser la modification et renvoyer l'alerte en double)."""
+    brut = strip_html(text)
+    if _tg_len(brut) <= TG_MAX:
+        return text, "HTML"
+    while _tg_len(brut) > TG_MAX - 2:
+        brut = brut[:-(1 + (_tg_len(brut) - TG_MAX) // 2)]
+    return brut + " …", None
+
+
 class TelegramError(RuntimeError):
     def __init__(self, method: str, code, description: str):
         super().__init__(f"Telegram {method} : {code} {description}")
@@ -193,7 +212,7 @@ class Telegram:
                 raise TelegramError(method, data.get("error_code"), data.get("description"))
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 attente = min(60, 2 ** tentative)
-                log.warning("Erreur réseau Telegram (%s), nouvel essai dans %ss", e, attente)
+                log.warning("Erreur réseau Telegram (%s), nouvel essai dans %ss", str(e) or type(e).__name__, attente)
                 await asyncio.sleep(attente)
         raise RuntimeError(f"Telegram {method} : échec après plusieurs essais")
 
@@ -350,9 +369,9 @@ class Telegram:
             payload["message_thread_id"] = thread_id
         elif chat_id is None and self.forum and topic in self.threads:
             payload["message_thread_id"] = self.threads[topic]
-        if len(text) > 4096:
-            payload.update(text=strip_html(text)[:4090] + " …", parse_mode=None)
-            payload.pop("parse_mode")
+        payload["text"], mode = fit(text)
+        if mode is None:
+            payload.pop("parse_mode", None)
         try:
             return await self._call("sendMessage", payload)
         except TelegramError as e:
@@ -364,23 +383,38 @@ class Telegram:
             if "can't parse entities" in desc:
                 # HTML refusé (texte externe mal formé) : on envoie le texte brut plutôt que rien
                 payload.pop("parse_mode", None)
-                payload["text"] = strip_html(text)[:4096]
+                payload["text"] = fit(strip_html(text))[0]
                 return await self._call("sendMessage", payload)
             raise
 
     async def edit_in(self, chat_id: str | int, message_id: int, text: str, reply_markup: dict | None = None) -> bool:
-        payload = {"chat_id": chat_id, "message_id": message_id, "text": text[:4096], "parse_mode": "HTML",
-                   "link_preview_options": {"is_disabled": True}}
+        payload = {"chat_id": chat_id, "message_id": message_id, "link_preview_options": {"is_disabled": True}}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        try:
-            await self._call("editMessageText", payload)
-            return True
-        except TelegramError as e:
-            if "not modified" in e.description:
-                return True
-            log.debug("Modification impossible : %s", e)
-            return False
+        ok, err = await self._edit(payload, text)
+        if not ok:
+            log.debug("Modification impossible : %s", err)
+        return ok
+
+    async def _edit(self, payload: dict, text: str) -> tuple[bool, str]:
+        """editMessageText avec le même garde-fou que l'envoi (longueur, HTML refusé -> texte brut)."""
+        payload["text"], mode = fit(text)
+        if mode:
+            payload["parse_mode"] = mode
+        for essai in range(2):
+            try:
+                await self._call("editMessageText", payload)
+                return True, ""
+            except TelegramError as e:
+                desc = e.description.lower()
+                if "not modified" in desc:
+                    return True, ""
+                if essai == 0 and "can't parse entities" in desc:
+                    payload.pop("parse_mode", None)
+                    payload["text"] = fit(strip_html(text))[0]
+                    continue
+                return False, e.description
+        return False, "?"
 
     async def send_document(self, chat_id: str | int, filename: str, data: bytes, caption: str = "",
                             thread_id: int | None = None, reply_to: int | None = None,
@@ -441,18 +475,13 @@ class Telegram:
 
     async def edit_now(self, message_id: int, text: str, reply_markup: dict | None = None) -> bool:
         """Modifie un message. False si le message n'existe plus (à renvoyer)."""
-        payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:4096],
-                   "parse_mode": "HTML", "disable_web_page_preview": True}
+        payload = {"chat_id": self.chat_id, "message_id": message_id, "link_preview_options": {"is_disabled": True}}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        try:
-            await self._call("editMessageText", payload)
-            return True
-        except TelegramError as e:
-            if "not modified" in e.description:
-                return True
-            log.warning("Modification impossible : %s", e)
-            return False
+        ok, err = await self._edit(payload, text)
+        if not ok:
+            log.warning("Modification impossible : %s", err)
+        return ok
 
     async def pin(self, message_id: int) -> None:
         try:

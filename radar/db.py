@@ -271,15 +271,25 @@ class DB:
         row = self.conn.execute("SELECT last_sig FROM wallet_state WHERE address=?", (address,)).fetchone()
         return row["last_sig"] if row else None
 
-    def set_last_sig(self, address: str, sig: str) -> None:
+    def set_last_sig(self, address: str, sig: str, ts: int | None = None) -> None:
+        """Point de reprise ; `ts` = heure (bloc) de la tx, pour savoir depuis quand le wallet dort."""
         self.conn.execute("INSERT OR REPLACE INTO wallet_state(address,last_sig,last_ts) VALUES(?,?,?)",
-                          (address, sig, int(time.time())))
+                          (address, sig, int(ts or time.time())))
         self.conn.commit()
+
+    def last_activity(self, address: str) -> int:
+        row = self.conn.execute("SELECT last_ts FROM wallet_state WHERE address=?", (address,)).fetchone()
+        return int(row["last_ts"] or 0) if row else 0
 
     # --- réglages (sujets Telegram, message épinglé…) ------------------------
     def get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
+
+    def settings_like(self, prefix: str) -> list[tuple[str, str]]:
+        """Réglages dont la clé commence par ce préfixe (ex. « noisy: »)."""
+        return [(r["key"], r["value"]) for r in
+                self.conn.execute("SELECT key, value FROM settings WHERE key LIKE ? || '%'", (prefix,))]
 
     def put(self, key: str, value: str | int | None) -> None:
         if value is None:
@@ -289,6 +299,11 @@ class DB:
         self.conn.commit()
 
     # --- annonces X ---------------------------------------------------------------
+    def unsee_tweet(self, url: str) -> None:
+        """Remet un tweet à lire plus tard (l'IA locale n'a pas eu le temps de le lire)."""
+        self.conn.execute("DELETE FROM tweets_seen WHERE url=?", (url,))
+        self.conn.commit()
+
     def tweet_seen(self, url: str) -> bool:
         cur = self.conn.execute("INSERT OR IGNORE INTO tweets_seen(url,at) VALUES(?,?)", (url, int(time.time())))
         self.conn.commit()
@@ -301,7 +316,8 @@ class DB:
                 return row
         if ticker:
             return self.conn.execute(
-                "SELECT * FROM announcements WHERE ticker=? AND first_seen>=? ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM announcements WHERE ticker=? AND first_seen>=? "
+                "AND COALESCE(status, '') NOT LIKE 'écarté%' ORDER BY id DESC LIMIT 1",
                 (ticker, since)).fetchone()
         return None
 
@@ -328,7 +344,8 @@ class DB:
     def announcements_since(self, since: int) -> list[sqlite3.Row]:
         """Annonces vues depuis `since` ou dont le lancement est après `since`."""
         return self.conn.execute(
-            "SELECT * FROM announcements WHERE first_seen>=? OR launch_ts>=? ORDER BY COALESCE(launch_ts, 9e18), id",
+            "SELECT * FROM announcements WHERE (first_seen>=? OR launch_ts>=?) "
+            "AND COALESCE(status, '') NOT LIKE 'écarté%' ORDER BY COALESCE(launch_ts, 9e18), id",
             (since, since)).fetchall()
 
     # --- profils X ------------------------------------------------------------------

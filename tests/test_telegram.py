@@ -60,3 +60,14 @@ def test_remplacement_du_message_rapide(tmp_path, monkeypatch):
     run_worker(tg, scenario)
     assert edits == [(42, "complet")]
     db.close()
+
+
+def test_longueur_mesuree_sur_le_texte_visible():
+    # Beaucoup de liens : > 4096 caractères de HTML mais bien moins de texte visible -> reste en HTML
+    from radar.telegram import TG_MAX, _tg_len, fit
+    riche = "\n".join(f'<a href="https://solscan.io/account/{"A" * 44}">wallet {i}</a>' for i in range(60))
+    assert len(riche) > TG_MAX and fit(riche) == (riche, "HTML")
+    # Trop long même visible : texte brut, coupé sans balise orpheline, emojis comptés double
+    long = "<b>🔴 alerte</b> " + "🚩 drapeau <i>grave</i>\n" * 400
+    texte, mode = fit(long)
+    assert mode is None and "<" not in texte and _tg_len(texte) <= TG_MAX and texte.endswith("…")

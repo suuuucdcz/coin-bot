@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from collections import deque
+from collections import Counter, deque
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
 
@@ -86,6 +87,7 @@ class SolanaRPC:
         self.auth_error: str | None = None      # clé refusée / quota épuisé
         self.failures: deque[float] = deque(maxlen=200)
         self.calls = {URGENT: 0, BACKGROUND: 0}
+        self.by_method: Counter[str] = Counter()   # requêtes envoyées par méthode (= crédits Helius)
 
     async def __aenter__(self) -> "SolanaRPC":
         return self
@@ -130,6 +132,7 @@ class SolanaRPC:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         for tentative in range(7):
             await self._throttle()
+            self.by_method[method if _priority.get() == URGENT else method + " (fond)"] += 1
             self._id += 1
             body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
             try:
@@ -235,7 +238,31 @@ class _Retry(Exception):
     pass
 
 
-OnSignature = Callable[[str, str, Any], Awaitable[None]]
+OnSignature = Callable[[str, str, Any, list], Awaitable[None]]
+
+# Ouverture d'un pool (Raydium « initialize2 » / CPMM « Initialize », PumpSwap « CreatePool », Meteora…)
+_POOL_INIT_RE = re.compile(r"Instruction: (Initialize|InitializePool\w*|CreatePool\w*|InitializeLbPair\w*|"
+                           r"InitializeCustomizablePermissionlessLbPair\w*)$|initialize2: ", re.I)
+
+
+def notable_logs(logs: list[str] | None, strict: bool = False) -> bool:
+    """Pour un wallet très actif : la transaction mérite-t-elle un getTransaction (1 crédit Helius) ?
+
+    Toujours : création d'un token (InitializeMint), ouverture d'un pool, logs incomplets.
+    Sauf en mode strict : simple virement de SOL (funding, retour de profits).
+    Jamais : swaps, transferts de tokens, collecte de frais, NFT… (vu en vrai : 4 wallets à 80-200 tx/h
+    mangeaient 80 % du quota gratuit sans jamais donner d'alerte).
+    """
+    if not logs or any("Log truncated" in l for l in logs):
+        return True
+    if any("Instruction: InitializeMint" in l for l in logs):
+        return True
+    if any(_POOL_INIT_RE.search(l) for l in logs):
+        return True
+    if strict:
+        return False
+    progs = {l.split()[1] for l in logs if l.startswith("Program ") and " invoke [" in l}
+    return bool(progs) and progs <= SIMPLE_TRANSFER_PROGRAMS
 
 
 class LogsWatcher:
@@ -254,6 +281,8 @@ class LogsWatcher:
         self._ws = None
         self.connected = asyncio.Event()
         self.down_since: float | None = time.time()   # None = connecté
+        self.connections = 0                  # connexions réussies depuis le démarrage
+        self.last_gap: float | None = None    # durée de la dernière coupure (None = premier démarrage)
         self.last_notification = 0.0
 
     async def add(self, address: str) -> None:
@@ -298,6 +327,8 @@ class LogsWatcher:
                         await self._subscribe(a)
                     log.info("Websocket connecté, %d abonnements demandés", len(self.addresses))
                     backoff = 1
+                    self.last_gap = time.time() - self.down_since if self.connections and self.down_since else None
+                    self.connections += 1
                     self.down_since = None
                     self.connected.set()
                     if self.on_connect:
@@ -337,7 +368,7 @@ class LogsWatcher:
         self.last_notification = time.time()
         if addr and value.get("signature"):
             try:
-                await self.on_signature(addr, value["signature"], value.get("err"))
+                await self.on_signature(addr, value["signature"], value.get("err"), value.get("logs") or [])
             except Exception:
                 log.exception("Erreur dans le traitement d'une notification")
 
