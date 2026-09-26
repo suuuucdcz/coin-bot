@@ -1,0 +1,21 @@
+group,label,address,role,notes
+reserve-cluster,BANK_H9L2,H9L2M3NNQEVxz5vShmYG2esJ1pwkPBrJdMNLBnnzhQSF,bank principal,1101 SOL; envoie 90 SOL par dev wallet; récupère les profits (1076 SOL depuis dev VSOF à 04:51 UTC)
+reserve-cluster,SEED_99yF,99yFt79XKfq4akF59TceJb42FC1Fb3M5B24YiChc9cf1,seed wallet,49.5 SOL restants; financé 50 SOL par is6MTRHE (hot wallet); envoie 0.10 SOL à 5 relais à 01:52 UTC
+reserve-cluster,SRC_is6M,is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV,source (hot wallet/CEX probable),vérifier le label sur Solscan
+reserve-cluster,DEV_WSOS,4TCSqgug46FtJnagjE8kNUKrJP3EhrbqZXDNYQ3sTKWC,dev,World Strategic Oil Supply
+reserve-cluster,DEV_NTDA,2Pp3KzKoVkf1nwLJTrmXTHrCwFxDWjRfDwPCgr8JW28d,dev,National Trump Digital Accounts
+reserve-cluster,DEV_UDR,izyUqKjBQNHocZXxGaiwyvwCSr6UmK5qf75Utgo8g7f,dev,UNITED DIVIDEND RESERVE
+reserve-cluster,DEV_AOR,49tUKLVNZxeoZ2acjAjec8wTNc9n4ZW7CKHxdbSBHDZU,dev,American Oil Reserve
+reserve-cluster,DEV_VSOF,FsVD9BSSzNXoaxw8ZSFdiEoit539ieSEfqgQpisNZRyE,dev,Vanguard Strategic Oil Fund - rug (~2k$ mcap) - 1076 SOL renvoyés au bank
+reserve-cluster,DIST_4mgV,4mgVSAZ4W7NpLbFdxFSuKPiuACS1B6DQuwMQezuaUAKa,distributeur,415 SOL reçus du bank à 03:24 UTC
+reserve-cluster,DIST_Ct1v,Ct1vv5s9FYqeT7HXsxjFuPhVQ8uY7TfYrups81Ejofhb,distributeur,415 SOL reçus du bank à 03:24 UTC
+reserve-cluster,DIST_2Hyp,2HypWnTtWJMyuxSqwE6NDtvn5tD6ybkTH8N2QqCaU8Bh,distributeur,415 SOL reçus du bank à 03:24 UTC
+reserve-cluster,DIST_C58E,C58EGeWdNcu76QRtZB4S7fH9F7JygZpXCmPhmW7JAfEm,distributeur,415 SOL reçus du bank à 03:24 UTC
+reserve-cluster,DIST_7CBG,7CBG5YpaSofRe1jQV7fdaL4hGGVV7yHt1Q7qtHEcbGNX,distributeur,415 SOL reçus du bank à 03:24 UTC
+ASH (Ashborn),ASH_DEV_MAIN,HiQdmuwcQuzhL5KJxqMh7WGzMcdjjLfsGSe1pcLM6YnM,wallet principal du dev (bank probable),wallet de 4 ans; tag Solscan 'Token Creator Pump.fun'; a créé ASHOOD + HMAX le 04/09 (morts); a fourni 0.5 SOL au wallet LP; a financé 83 comptes
+ASH (Ashborn),ASH_MINTER,CGUfGKcQy7cQbfmjQXSjW6uaQdG7ezGjaGndi98dWDgC,créateur du mint,a minté 10B ASH puis tout envoyé au wallet LP; financé par 33yhak3x (lui-même financé par MEXC)
+ASH (Ashborn),ASH_FUNDER,33yhak3xPxpcRB9XbhbhSYgqsZa1rBmF7k55VydUXEHp,relais,financé par hot wallet MEXC
+ASH (Ashborn),ASH_LP_WALLET,Bqxuzhw484izLTXS6wWS8PvuTWZEcHFQ9VdwDgKX3fhH,détient 6B ASH (60% = liquidité),c'est lui qui ajoutera la LP sur Raydium à 18:00 UTC
+ASH (Ashborn),ASH_BURN_OR_AIRDROP_1,G9gRkS1R37R1fMhFcgcsV3qqC6Qv3HxKeLDLYhNCx8RW,détient 2B ASH (20%),'Flame' (burn) ou 'Ember' (airdrop) - à surveiller: s'il vend = red flag
+ASH (Ashborn),ASH_BURN_OR_AIRDROP_2,EFQbj5dQTLheSfYKNvArzhkHfRkB4S2Ej4pUjJsYiEq8,détient 2B ASH (20%),idem
+ASH (Ashborn),ASH_MINT,DU5L11pfQ1EyDWvBhM5sp2piGeHEYDy9sdTvDkfcKrNs,contrat du token,mint + freeze révoqués; supply 10B
