@@ -143,7 +143,7 @@ def _mime(b64: str) -> str:
 
 class LocalLLM:
     def __init__(self, url: str, model: str, http: aiohttp.ClientSession | None, enabled: bool = True,
-                 provider: str = "ollama", api_key: str = "", daily_max: int = 450):
+                 provider: str = "ollama", api_key: str = "", daily_max: int = 450, store=None):
         self.url = url.rstrip("/")
         self.model = model
         self.http = http
@@ -151,6 +151,7 @@ class LocalLLM:
         self.provider = "gemini" if provider == "gemini" and api_key else "ollama"
         self.api_key = api_key
         self.daily_max = daily_max
+        self.store = store                   # base (get/put) pour garder le compteur Gemini du jour
         self._ok_until = 0.0
         self._down_until = 0.0
         self._sem = asyncio.Semaphore(1)     # une requête à la fois (carte graphique partagée / quota Gemini)
@@ -175,7 +176,8 @@ class LocalLLM:
     def _quota_left(self) -> bool:
         jour = datetime.now(PACIFIQUE).strftime("%Y-%m-%d")
         if jour != self._day:
-            self._day, self.day_calls = jour, 0
+            # Compteur gardé en base s'il y en a une : un redémarrage ne remet pas le quota du jour à zéro
+            self._day, self.day_calls = jour, int((self.store.get(f"gemini_jour:{jour}") if self.store else 0) or 0)
         return self.day_calls < self.daily_max
 
     async def available(self) -> bool:
@@ -242,6 +244,8 @@ class LocalLLM:
                 return None
             self.last_ms = int(1000 * (time.time() - debut))
         self.day_calls += 1
+        if self.store:
+            self.store.put(f"gemini_jour:{self._day}", self.day_calls)
         if statut == 429:
             self._down_until = time.time() + 900
             log.warning("API Gemini : quota atteint (%d appels aujourd'hui) : règles seules 15 min", self.day_calls)

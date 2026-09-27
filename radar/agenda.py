@@ -70,7 +70,7 @@ class Agenda(CandidatsMixin, FauxCoinsMixin, AffichageMixin):
                             else getattr(cfg, "llm_model", "gemma4:e4b"),
                             pipeline.http, getattr(cfg, "llm_enabled", False),
                             provider="gemini" if gemini else "ollama", api_key=getattr(cfg, "gemini_api_key", ""),
-                            daily_max=getattr(cfg, "llm_daily_max", 450))
+                            daily_max=getattr(cfg, "llm_daily_max", 450), store=self.db)
         self._last_plan = 0.0
         for r in self.db.announcements_since(int(time.time()) - MATCH_WINDOW_S):
             for c in json.loads(r["details"] or "{}").get("dev_candidates", []):

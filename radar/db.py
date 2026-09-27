@@ -332,6 +332,33 @@ class DB:
     def results_since(self, since: int) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM results WHERE sent_at>=? ORDER BY sent_at", (since,)).fetchall()
 
+    # --- remise à zéro ----------------------------------------------------------------
+    # Toujours effacés : l'historique et les compteurs (alertes, agenda, tokens, résultats, compteurs d'activité).
+    # Toujours gardés : configuration Telegram (sections, messages épinglés), réglages (son, sourdines), compteurs
+    # d'API (crédits Helius du mois, quota Gemini du jour).
+    RESET_TABLES = ("alerts", "results", "announcements", "tokens", "tweets_seen", "networks")
+    RESET_KEYS = ("ann_seen:", "buys:", "creates:", "grp_tokens:", "daily_report", "discovery_last")
+    # Avec tout=True, en plus : ce que le radar a APPRIS (wallets ajoutés, liens, étiquettes, classements)
+    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts")
+    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:")
+
+    def remise_a_zero(self, tout: bool = False) -> dict[str, int]:
+        """Efface l'historique et les compteurs (voir RESET_*). tout=True : repart aussi de la watchlist de départ."""
+        n: dict[str, int] = {}
+        for t in self.RESET_TABLES + (self.LEARNED_TABLES if tout else ()):
+            n[t] = self.conn.execute(f"DELETE FROM {t}").rowcount
+        prefixes = self.RESET_KEYS + (self.LEARNED_KEYS if tout else ())
+        cles = [k for (k,) in self.conn.execute("SELECT key FROM settings") if k.startswith(prefixes)]
+        self.conn.executemany("DELETE FROM settings WHERE key=?", [(k,) for k in cles])
+        n["compteurs"] = len(cles)
+        if tout:
+            # Ne restent que les wallets de data/watchlist.csv (réimportée à chaque démarrage)
+            n["wallets"] = self.conn.execute(
+                "DELETE FROM wallets WHERE NOT (depth=0 AND COALESCE(grp,'') != 'découverte')").rowcount
+        self.conn.commit()
+        self.conn.execute("VACUUM")
+        return n
+
     def settings_like(self, prefix: str) -> list[tuple[str, str]]:
         """Réglages dont la clé commence par ce préfixe (ex. « noisy: »)."""
         return [(r["key"], r["value"]) for r in
@@ -442,6 +469,18 @@ def main() -> int:
         return 0
     db = DB(cfg.db_path)
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "remise-a-zero":
+            # A lancer radar ARRÊTÉ (sinon il réécrit aussitôt ce qu'il a en mémoire)
+            tout = "--tout" in sys.argv
+            copie = cfg.db_path.with_name(f"{cfg.db_path.name}.avant-remise-{time.strftime('%Y%m%d-%H%M%S')}")
+            with sqlite3.connect(copie) as dest:
+                db.conn.backup(dest)
+            n = db.remise_a_zero(tout)
+            print(f"Sauvegarde : {copie.name}")
+            print("Effacé : " + ", ".join(f"{k} {v}" for k, v in n.items()))
+            print("Gardé : configuration Telegram, réglages, crédits Helius du mois, quota Gemini du jour"
+                  + ("" if tout else ", watchlist apprise, liens, étiquettes, classements (snipers, usines…)"))
+            return 0
         if len(sys.argv) > 1 and sys.argv[1] == "wallets":
             for w in db.conn.execute("SELECT * FROM wallets WHERE active=1 ORDER BY grp, depth, label"):
                 print(f"{(w['grp'] or '-')[:18]:18} {(w['label'] or '')[:22]:22} p{w['depth']}  {w['address']}  "
