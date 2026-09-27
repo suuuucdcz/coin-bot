@@ -279,6 +279,8 @@ async def amain() -> int:
                     if time.time() > fin:
                         del pauses[a]
                         await watcher.add(a)   # fin de la pause d'une adresse de la watchlist de départ
+                if tours % 4 == 0 and pipeline.lancements is not None:
+                    log.info("%s", pipeline.lancements.status_line())
                 if tours % 4 == 0:
                     log.info("RPC par méthode depuis le démarrage : %s",
                              ", ".join(f"{m} {n}" for m, n in rpc.by_method.most_common(8)))

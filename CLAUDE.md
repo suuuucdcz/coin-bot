@@ -49,6 +49,7 @@ radar/
   results.py         # suivi 24 h de chaque alerte (section 📈 Résultats, /resultats)
   top.py             # « ‼️ À ne pas rater » : sélection + contrôle du token 5 min après l'alerte
   smart.py           # smart money : gros détenteurs de plusieurs vrais succès -> alerte 🧠 quand ils entrent ensemble
+  lancements.py      # tokens pump.fun qui décollent -> argent du créateur remonté -> wallet neuf d'un dev connu ?
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ
@@ -73,6 +74,8 @@ Règles ajoutées à l'usage :
   prévient s'il en voit un 2e) ; `X_LIGHT=1` (navigateur allégé, fermé entre deux tours) et swap zram sur 1 Go.
 - **Smart money (`smart.py`)** : seulement les succès de devs « découverte » (propres) ; parts identiques = bundle
   écarté ; 3 succès de 3 devs différents ; « À ne pas rater » à partir de 3 wallets ensemble (anti-appât).
+- **Traceur anti-leurre** : un premier funding < 0,05 SOL est comparé aux suivants de l'heure (vu sur $WAIF :
+  0,01 SOL via relais 1 s avant les 200 SOL du bank). **Tempête** : > 600 notifications en 10 min = adresse coupée.
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 
