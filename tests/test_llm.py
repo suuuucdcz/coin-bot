@@ -82,7 +82,7 @@ def test_bruit_ignore_et_arnaque_signalee():
     assert Agenda._merge_reading(info, clean_reading(lu(type="autre", confiance=0.95)), REF) is False
     info = parse_tweet("$MOON launching now, drop your wallet", REF)
     Agenda._merge_reading(info, clean_reading(lu(type="arnaque", confiance=0.9, raison="demande le wallet")), REF)
-    assert any("IA locale : arnaque" in s for s in info.scam)
+    assert any("IA : arnaque" in s for s in info.scam)
 
 
 def test_chef_d_orchestre_choisit_dans_la_liste_seulement():
@@ -179,5 +179,17 @@ def test_regles_seules_ni_ca_ni_heure_pas_d_annonce(tmp_path):
     ag = Agenda.__new__(Agenda)
     ag.db = DB(tmp_path / "radar.db")
     t = {"url": "https://x.com/a/status/1", "handle": "Kingstaccz", "text": "use the launch pad $JACK"}
+    asyncio.run(ag.upsert(t, parse_tweet(t["text"], REF)))
+    assert ag.db.announcements_since(0) == []
+
+
+def test_ia_pas_convaincue_ni_ca_ni_heure_pas_d_annonce(tmp_path):
+    # L'IA a lu le tweet sans y voir une annonce (« autre » à 70 %, pas assez sûr pour l'écarter) : sans CA ni
+    # heure, aucune fiche n'est créée (avant : le simple fait que l'IA ait lu le tweet suffisait)
+    from radar.db import DB
+    ag = Agenda.__new__(Agenda)
+    ag.db = DB(tmp_path / "radar.db")
+    t = {"url": "https://x.com/a/status/2", "handle": "quelquun", "text": "stealth launch vibes $JACK",
+         "ai_local": clean_reading(lu(type="autre", confiance=0.7, ticker="JACK"))}
     asyncio.run(ag.upsert(t, parse_tweet(t["text"], REF)))
     assert ag.db.announcements_since(0) == []

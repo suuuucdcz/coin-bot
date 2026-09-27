@@ -300,7 +300,7 @@ class DB:
 
     # --- annonces X ---------------------------------------------------------------
     def unsee_tweet(self, url: str) -> None:
-        """Remet un tweet à lire plus tard (l'IA locale n'a pas eu le temps de le lire)."""
+        """Remet un tweet à lire plus tard (l'IA n'a pas eu le temps de le lire)."""
         self.conn.execute("DELETE FROM tweets_seen WHERE url=?", (url,))
         self.conn.commit()
 

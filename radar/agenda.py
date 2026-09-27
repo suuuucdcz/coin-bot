@@ -40,7 +40,7 @@ COMMON_FUNDER_STRONG = 3            # un wallet qui a financé ≥ 3 acheteurs d
 # Vérification d'un candidat : le compte officiel (X, bio, site de sa bio) affiche-t-il CE contrat ?
 VERIFY_DELAYS_S = (30, 120, 300, 900, 1800)
 PROFILE_FRESH_S = 1800
-READ_PER_BATCH = 12          # tweets lus par l'IA locale par page X (la carte graphique est partagée)
+READ_PER_BATCH = 12          # tweets lus par l'IA par page X (plafond ; 4 avec le quota gratuit de Gemini)
 PLAN_EVERY_S = 600           # le chef d'orchestre choisit les prochaines recherches X toutes les 10 min
 
 
@@ -425,7 +425,7 @@ class Agenda:
         if lu["type"] == "autre" and lu["confiance"] >= 0.85 and not info.cas and not info.launch_ts:
             return False
         if lu["type"] == "arnaque" and lu["confiance"] >= 0.75:
-            info.scam.append(f"IA locale : arnaque probable ({lu['confiance']:.0%}) — {lu['raison']}")
+            info.scam.append(f"IA : arnaque probable ({lu['confiance']:.0%}) — {lu['raison']}")
         if not info.tickers and lu["ticker"]:
             info.tickers = [lu["ticker"]]
         if not info.cas and lu["contrat"]:
@@ -501,10 +501,10 @@ class Agenda:
                 if lu:
                     t["ai_local"] = lu
                     if not self._merge_reading(info, lu, dt or datetime.now(timezone.utc), t.get("text", "")):
-                        log.info("Ignoré (IA locale : %s à %.0f %%) : %s", lu["type"], 100 * lu["confiance"], url)
+                        log.info("Ignoré (IA : %s à %.0f %%) : %s", lu["type"], 100 * lu["confiance"], url)
                         continue
                     if self._promo_only(info, lu):
-                        log.info("Ignoré (IA locale : promo d'un tiers sans CA ni heure) : %s", url)
+                        log.info("Ignoré (IA : promo d'un tiers sans CA ni heure) : %s", url)
                         continue
             if not info.is_candidate:
                 continue
@@ -536,11 +536,15 @@ class Agenda:
         ca = info.cas[0] if info.cas else None
         since = int(time.time()) - MATCH_WINDOW_S
         row = self.db.find_announcement(ticker, ca, since)
-        if row is None and not ca and not info.launch_ts and not (t.get("ai_local") or t.get("ai")):
-            # Règles seules (pas d'IA pour lire le tweet) : un ticker et un mot comme « launch » ne suffisent pas à
-            # créer une annonce (vu en vrai sur le serveur : une réponse, une promo et « use the launch pad »
-            # devenaient des lancements, et leur chasse au dev ajoutait 20 wallets inutiles). Il faut un CA ou une heure.
-            log.info("Ignoré (règles seules : ni CA ni heure de lancement) : %s", t.get("url"))
+        lu = t.get("ai_local")
+        annonce_ia = bool(lu and lu["type"] == "annonce_projet" and lu["confiance"] >= 0.6) or bool(
+            t.get("ai") and t["ai"].get("type") == "annonce_projet")
+        if row is None and not ca and not info.launch_ts and not annonce_ia:
+            # Sans CA ni heure, seule une annonce CONFIRMÉE par l'IA crée une fiche. Un ticker et un mot comme
+            # « launch » ne suffisent pas (vu en vrai sur le serveur : une réponse, une promo et « use the launch
+            # pad » devenaient des lancements, et leur chasse au dev ajoutait 20 wallets inutiles). Idem quand l'IA
+            # a lu le tweet sans y voir une annonce (« autre » ou « promo » pas assez sûrs pour être écartés).
+            log.info("Ignoré (pas d'annonce confirmée, ni CA ni heure de lancement) : %s", t.get("url"))
             return
         if row and ca and row["ca"] and ca != row["ca"]:
             # Même ticker, AUTRE contrat que celui de l'annonce : copie ou autre projet. Pas fusionné :

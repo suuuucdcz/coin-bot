@@ -61,6 +61,13 @@ Règles ajoutées à l'usage :
   Preuve forte = wallet du dev repéré on-chain, ou compte officiel (tweets, bio, site de sa bio) qui affiche ce CA.
   Un CA tweeté par un autre compte que le compte officiel n'est jamais relié directement à l'annonce.
 - **Jev (`analysis/jev.py`, optionnel)** : avis en plus des règles, jamais seul juge (pas conçu pour du contenu hostile).
+- **IA de lecture des tweets (`analysis/llm.py`)** : Ollama sur le PC, API Gemini sur un serveur (`GEMINI_API_KEY`, quota
+  quotidien plafonné). Elle ne fait que lire et choisir dans une liste ; sa réponse est vérifiée champ par champ. Sans CA ni
+  heure, seule une annonce confirmée par l'IA crée une fiche d'agenda ; sans IA, il faut un CA ou une heure.
+- **Serveur (Google Cloud e2-micro, `deploy/installer_serveur.sh`, `HEBERGEMENT.md`)** : un seul radar par bot (le radar
+  prévient s'il en voit un 2e) ; `X_LIGHT=1` (navigateur allégé, fermé entre deux tours) et swap zram sur 1 Go.
+- **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
+  démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 
 ## Détection on-chain : les règles
 

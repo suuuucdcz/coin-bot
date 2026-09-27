@@ -11,6 +11,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Le radar tourne-t-il sur le serveur Linux (Google Cloud) ou sur le PC Windows ? Les consignes affichées
+# sur Telegram en dépendent (configurer.bat et connexion_x.bat n'existent que sur le PC).
+SUR_SERVEUR = sys.platform.startswith("linux")
+MACHINE = "du serveur" if SUR_SERVEUR else "du PC"
+AIDE_X = ("session X à reprendre depuis le PC : HEBERGEMENT.md, « Veille X refusée »" if SUR_SERVEUR
+          else "double-clique sur connexion_x.bat")
+AIDE_CLE = ("mets la nouvelle clé dans ~/radar/.env puis relance le service (sudo systemctl restart memecoin-radar)"
+            if SUR_SERVEUR else "relance configurer.bat si la clé a changé")
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 LOGS_DIR = ROOT / "logs"
@@ -152,7 +161,7 @@ def load() -> Config:
         or (re.findall(r"-?\d+", _env("TELEGRAM_ADMINS")) or [""])[0],
         # Lien direct vers ta plateforme (optionnel), ex. https://…/{mint} : {mint} est remplacé par le CA
         trade_url=_env("TRADE_URL"),
-        # IA locale (Ollama) : lecture des tweets et choix des recherches X
+        # IA : lecture des tweets et choix des recherches X (Ollama sur le PC, ou API Gemini sur un serveur)
         llm_enabled=_bool("LLM_ENABLED", True),
         llm_url=_env("LLM_URL") or "http://127.0.0.1:11434",
         llm_model=_env("LLM_MODEL") or "gemma4:e4b",

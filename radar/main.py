@@ -112,7 +112,7 @@ async def amain() -> int:
                 xwatcher = XWatcher(cfg, agenda.on_tweets, lambda msg: tg.enqueue(msg, topic="system"))
                 agenda.xw = xwatcher
             else:
-                log.warning("Veille X désactivée : pas encore de session X (double-clique sur connexion_x.bat)")
+                log.warning("Veille X désactivée : pas encore de session X (%s)", cfgmod.AIDE_X)
 
         async def on_new_token(msg: dict) -> None:
             await pipeline.on_pumpportal_create(msg)
@@ -261,7 +261,7 @@ async def amain() -> int:
                     if down and now - down > DOWN_ALERT_S and not signale[nom]:
                         signale[nom] = True
                         system(f"🔌 <b>{libelle} coupé depuis {int((now - down) // 60)} min</b>\n"
-                               "Reconnexion automatique en cours. Vérifie la connexion internet du PC.")
+                               f"Reconnexion automatique en cours. Vérifie la connexion internet {cfgmod.MACHINE}.")
                     elif not down and signale[nom]:
                         signale[nom] = False
                         system(f"✅ {libelle} : reconnecté.")
@@ -269,7 +269,7 @@ async def amain() -> int:
                     signale["rpc"] = True
                     system(f"⛔ <b>Helius refuse les requêtes</b> ({esc(rpc.auth_error)})\n"
                            "Clé invalide ou crédits du mois épuisés : vérifie sur dashboard.helius.dev, "
-                           "puis relance configurer.bat si la clé a changé.")
+                           f"puis {cfgmod.AIDE_CLE}.")
                 elif rpc.recent_failures() >= 20 and not signale["rpc"]:
                     signale["rpc"] = True
                     system("⚠️ <b>Helius sature</b> (limite de débit atteinte plusieurs fois en 10 min). "
@@ -302,7 +302,7 @@ async def amain() -> int:
                        + f"\nAlertes : {sum(par_type.values())}"
                        + (" (" + ", ".join(f"{k} {v}" for k, v in sorted(par_type.items())) + ")" if par_type else "")
                        + f"\nNouveaux tokens pump.fun vus : {pumpportal.state['tokens']}"
-                       + f"\nVeille X : {'active' if xwatcher else 'inactive (connexion_x.bat)'}")
+                       + f"\nVeille X : {'active' if xwatcher else 'inactive (' + cfgmod.AIDE_X + ')'}")
 
         async def discovery_loop() -> None:
             await asyncio.sleep(120)  # laisse le radar démarrer
@@ -323,7 +323,7 @@ async def amain() -> int:
                 await asyncio.sleep(cfg.discovery_every_h * 3600)
 
         bot = Bot(cfg, db, tg, pipeline, agenda, watcher, xwatcher, stats)
-        pipeline._spawn(agenda.llm.warm_up())   # IA locale chargée en arrière-plan
+        pipeline._spawn(agenda.llm.warm_up())   # IA préparée en arrière-plan (modèle chargé ou clé vérifiée)
         ignores = len(db.active_wallets()) - len(pipeline.watched)
         contrats = ", ".join(esc(pipeline.label(m) or A_short(m)) for m in pipeline.mints)
         pause = f", pause {cfg.x_quiet_hours[0]} h-{cfg.x_quiet_hours[1]} h" if cfg.x_quiet_hours else ""
@@ -334,8 +334,10 @@ async def amain() -> int:
             + (f" <i>({ignores} exchange(s) ignoré(s))</i>" if ignores else ""),
             f"📜 En attente de lancement : {contrats}" if pipeline.mints else None,
             "🟣 Nouveaux tokens pump.fun : PumpPortal",
-            f"🐦 Veille X : active (rythme lent{pause})" if xwatcher else "⚠️ Veille X : inactive (connexion_x.bat)",
+            f"🐦 Veille X : active (rythme lent{pause})" if xwatcher else f"⚠️ Veille X : inactive ({cfgmod.AIDE_X})",
             f"🧭 Découverte auto de devs : toutes les {cfg.discovery_every_h} h" if cfg.discovery_enabled else None,
+            (f"🧠 IA pour lire les tweets : {esc(agenda.llm.label)}" if agenda.llm.enabled_cfg
+             else "🧠 IA pour lire les tweets : désactivée (règles strictes seules)"),
             "🤖 IA Jev : active (avis en plus des règles)" if cfg.typesafe_api_key else None,
             "───────────────",
             "<i>Tape /aide pour les commandes · colle un CA pour sa fiche.</i>",

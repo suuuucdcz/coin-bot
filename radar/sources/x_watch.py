@@ -184,7 +184,7 @@ class XWatcher:
         self.on_problem = on_problem
         self.profile_requests: asyncio.Queue[tuple[str, asyncio.Future]] = asyncio.Queue()
         self._warned = False
-        # Actions choisies par l'IA locale (agenda._plan_x) : elles REMPLACENT des recherches fixes,
+        # Actions choisies par l'IA (agenda._plan_x) : elles REMPLACENT des recherches fixes,
         # le nombre de pages lues par tour ne change pas
         self.extra_jobs: list[tuple[str, str]] = []
 

@@ -24,7 +24,7 @@ from .analysis.enrich import TokenInfo, token_info, x_handle
 from .analysis.jev import ROLE_LABELS
 from .analysis.tracer import Tracer, save_result
 from .analysis.xparse import is_solana_address
-from .config import _handles
+from .config import AIDE_X, _handles
 from .sources import pumpfun, pumpportal
 from .sources.helius import in_background
 from .sources.x_watch import quiet_until
@@ -230,7 +230,7 @@ class Bot:
         else:
             helius = "🟢 OK"
         if self.xw is None:
-            x = "⚪ inactive (connexion_x.bat)"
+            x = f"⚪ inactive ({AIDE_X})"
         else:
             reprise = quiet_until(self.cfg.x_quiet_hours)
             x = f"💤 pause de nuit jusqu'à {reprise:%H:%M}" if reprise else "🟢 active"
@@ -526,7 +526,7 @@ class Bot:
         if not self.xw:
             cached = self.db.x_account(h)
             if not cached:
-                await ctx.send("⚪ Veille X inactive : double-clique sur connexion_x.bat, puis relance le radar.")
+                await ctx.send(f"⚪ Veille X inactive : {AIDE_X}, puis relance le radar.")
                 return
         mid = await ctx.send(f"🐦 Lecture de @{esc(h)}…\n<i>Rythme lent anti-ban : jusqu'à quelques minutes.</i>")
         self._spawn(self._x_job(ctx, mid, h))

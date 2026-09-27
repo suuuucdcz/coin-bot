@@ -8,7 +8,7 @@ Ce que ça donne :
 |---|---|
 | Radar on-chain (Helius, PumpPortal, Telegram) | ✅ comme sur le PC |
 | Veille X | ✅ en mode allégé (sans images), si X accepte la session depuis le serveur |
-| IA locale (Ollama) | ❌ 1 Go de mémoire, c'est trop peu : les tweets sont lus par les règles |
+| IA pour lire les tweets | ✅ via l'API Gemini gratuite (voir « Activer l'IA Gemini » plus bas) ; sans elle, règles strictes |
 | Coût | 0 € si tu suis les réglages ci-dessous |
 
 ## Les 4 pièges qui feraient payer
@@ -88,6 +88,23 @@ Tu dois recevoir « 🛰 MEMECOIN RADAR EN LIGNE » dans la section système du 
 ### 5. Ne garder qu'un seul radar
 
 **Ne relance plus run.bat sur le PC.** Deux radars sur le même bot, c'est des alertes en double et des commandes Telegram en conflit.
+
+## Activer l'IA Gemini (lecture des tweets)
+
+Le serveur n'a pas de carte graphique pour l'IA locale : il utilise l'API Gemini, gratuite (≈ 500 lectures par jour, le radar
+s'arrête à 450 puis repasse sur les règles strictes jusqu'au lendemain).
+
+1. Sur `aistudio.google.com/apikey`, crée une clé dans un projet **sans facturation** (un `gen-lang-client-…` ou celui
+   qu'AI Studio propose). Dans un projet facturé, c'est le palier payant. Ne colle jamais la clé dans une discussion.
+2. Dans le terminal SSH du serveur (remplace `TA_CLE`, garde `GEMINI_API_KEY=` devant) :
+
+   ```
+   echo 'GEMINI_API_KEY=TA_CLE' >> ~/radar/.env && sed -i 's/^LLM_ENABLED=.*/LLM_ENABLED=1/' ~/radar/.env && sudo systemctl restart memecoin-radar
+   ```
+
+3. `/statut` doit afficher « 🧠 IA : 🟢 gemini-3.5-flash-lite (API Gemini) » avec le quota du jour.
+
+Changer de clé : `nano ~/radar/.env`, remplace la valeur de la ligne `GEMINI_API_KEY=`, puis relance le service.
 
 ## Au quotidien (bouton SSH de la console)
 
