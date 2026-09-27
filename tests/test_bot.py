@@ -198,3 +198,12 @@ def test_toutes_les_alertes_en_html_valide():
     kb = A.token_buttons(info, WATCHED, mute=WATCHED, follow=WATCHED)
     assert all(len(b.get("callback_data", "")) <= 64 for row in kb["inline_keyboard"] for b in row)
     assert re.search(r"n:\w+", str(kb))   # bouton « 🕸 Réseau du dev »
+
+
+def test_deux_radars_sur_le_meme_bot_signales(bot):
+    # Telegram répond 409 « Conflict » quand deux programmes lisent le même bot (PC + serveur)
+    b = bot[0]
+    b._double_radar()
+    b._double_radar()   # une seule fois par heure
+    en_file = [b.tg.queue.get_nowait() for _ in range(b.tg.queue.qsize())]
+    assert len([m for m in en_file if "Deux radars" in m[0]]) == 1

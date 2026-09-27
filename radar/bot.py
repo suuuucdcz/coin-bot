@@ -78,6 +78,16 @@ class Bot:
     def allowed(self, chat_id, user_id) -> bool:
         return str(chat_id) == str(self.tg.chat_id) or user_id in self.admins
 
+    def _double_radar(self) -> None:
+        """Prévient (une fois par heure) qu'un autre radar utilise le même bot : alertes en double garanties."""
+        if time.time() - getattr(self, "_double_warned", 0) < 3600:
+            return
+        self._double_warned = time.time()
+        log.error("Un AUTRE radar utilise ce bot Telegram (PC et serveur en même temps ?)")
+        self.tg.enqueue("⚠️ <b>Deux radars tournent en même temps sur ce bot</b>\n"
+                        "Alertes en double et commandes qui se perdent. Si le radar tourne sur le serveur, "
+                        "ferme <code>run.bat</code> sur le PC.", kind="system", topic="system")
+
     async def run(self) -> None:
         offset = int(self.db.get("tg_offset") or 0)
         while True:
@@ -86,6 +96,9 @@ class Bot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                if getattr(e, "code", None) == 409:
+                    # Telegram refuse deux lecteurs pour un même bot : un 2e radar tourne (PC + serveur ?)
+                    self._double_radar()
                 log.warning("Réception des commandes Telegram : %s (nouvel essai dans 15 s)", str(e) or type(e).__name__)
                 await asyncio.sleep(15)
                 continue
@@ -237,10 +250,12 @@ class Bot:
             + (f" · {self.stats['filtrées']} tx de wallets très actifs non téléchargées" if self.stats.get("filtrées") else ""),
             f"🟣 PumpPortal : {etat(pumpportal.state['down_since'])} · {pumpportal.state['tokens']} tokens vus",
             f"🐦 Veille X : {x}",
-            "🧠 IA locale : " + (f"🟢 {esc(self.agenda.llm.model)} · {self.agenda.llm.calls} lectures"
-                                  + (f" · {self.agenda.llm.last_ms / 1000:.1f} s la dernière" if self.agenda.llm.calls else "")
-                                  if self.agenda.llm.enabled and time.time() < self.agenda.llm._ok_until
-                                  else "⚪ indisponible (Ollama éteint ?)"),
+            "🧠 IA : " + (f"🟢 {esc(self.agenda.llm.label)} · {self.agenda.llm.calls} lectures"
+                           + (f" · {self.agenda.llm.last_ms / 1000:.1f} s la dernière" if self.agenda.llm.calls else "")
+                           + (f" · quota du jour {self.agenda.llm.day_calls}/{self.agenda.llm.daily_max}"
+                              if self.agenda.llm.provider == "gemini" else "")
+                           if self.agenda.llm.enabled and time.time() < self.agenda.llm._ok_until
+                           else "⚪ indisponible : tweets lus par les règles seules (strictes)"),
             f"🤖 IA Jev : {'🟢 active' if self.agenda.jev.enabled else '⚪ non configurée'}",
             A.SEP,
             f"👛 Wallets suivis : <b>{len(self.watcher.addresses)}</b> / {self.cfg.watch_max}",

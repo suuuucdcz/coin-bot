@@ -1,4 +1,5 @@
-"""🧠 IA locale (Gemma 4 via Ollama, sur ta carte graphique) : lecteur de tweets et chef d'orchestre de la veille X.
+"""🧠 IA (Gemma 4 via Ollama sur ta carte graphique, ou l'API Gemini sur le serveur) : lecteur de tweets et chef
+d'orchestre de la veille X.
 
 Deux rôles, et seulement deux :
   1. read_tweet() : lire un tweet comme un humain (texte ET images) -> type (annonce du projet, promo d'un
@@ -25,9 +26,18 @@ import logging
 import re
 import time
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import aiohttp
 
 log = logging.getLogger("llm")
+
+# API Gemini (serveur sans carte graphique) : palier gratuit ~15 requêtes/min et ~500/jour pour Flash-Lite,
+# SEULEMENT si la clé vient d'un projet sans facturation (AI Studio) ; sinon c'est le palier payant.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}"
+GEMINI_MIN_INTERVAL_S = 4.5
+PACIFIQUE = ZoneInfo("America/Los_Angeles")   # le quota quotidien de Google repart à minuit, heure du Pacifique
 
 TIMEOUT_S = 60
 KEEP_ALIVE = "24h"           # le modèle reste chargé dans la carte graphique (1er chargement ≈ 45 s)
@@ -106,28 +116,78 @@ official account not yet checked). Avoid anything flagged as a scam. Answer with
 and a short French reason (at most 15 words)."""
 
 
+def gemini_schema(s: dict) -> dict:
+    """Schéma JSON (format Ollama) -> schéma de l'API Gemini (types en majuscules, « nullable »)."""
+    t = s.get("type")
+    nullable = isinstance(t, list) and "null" in t
+    if isinstance(t, list):
+        t = next(x for x in t if x != "null")
+    out: dict = {"type": str(t).upper()}
+    if nullable:
+        out["nullable"] = True
+    if "enum" in s:
+        out["enum"] = list(s["enum"])
+    if t == "object":
+        out["properties"] = {k: gemini_schema(v) for k, v in s.get("properties", {}).items()}
+        if s.get("required"):
+            out["required"] = list(s["required"])
+    if t == "array":
+        out["items"] = gemini_schema(s["items"])
+    return out
+
+
+def _mime(b64: str) -> str:
+    tete = base64.b64decode(b64[:24] + "=" * (-len(b64[:24]) % 4))
+    return "image/png" if tete.startswith(b"\x89PNG") else "image/webp" if tete[8:12] == b"WEBP" else "image/jpeg"
+
+
 class LocalLLM:
-    def __init__(self, url: str, model: str, http: aiohttp.ClientSession | None, enabled: bool = True):
+    def __init__(self, url: str, model: str, http: aiohttp.ClientSession | None, enabled: bool = True,
+                 provider: str = "ollama", api_key: str = "", daily_max: int = 450):
         self.url = url.rstrip("/")
         self.model = model
         self.http = http
         self.enabled_cfg = enabled
+        self.provider = "gemini" if provider == "gemini" and api_key else "ollama"
+        self.api_key = api_key
+        self.daily_max = daily_max
         self._ok_until = 0.0
         self._down_until = 0.0
-        self._sem = asyncio.Semaphore(1)     # une requête à la fois : la carte graphique est partagée
+        self._sem = asyncio.Semaphore(1)     # une requête à la fois (carte graphique partagée / quota Gemini)
+        self._next_call = 0.0
+        self._day, self.day_calls = "", 0
         self.calls = 0
         self.last_ms = 0
+
+    @property
+    def label(self) -> str:
+        return f"{self.model} (API Gemini)" if self.provider == "gemini" else self.model
+
+    @property
+    def per_batch(self) -> int:
+        """Tweets lus par page X : 12 avec la carte graphique, 4 avec le quota gratuit de Gemini."""
+        return 4 if self.provider == "gemini" else 12
 
     @property
     def enabled(self) -> bool:
         return bool(self.enabled_cfg and self.http) and time.time() >= self._down_until
 
+    def _quota_left(self) -> bool:
+        jour = datetime.now(PACIFIQUE).strftime("%Y-%m-%d")
+        if jour != self._day:
+            self._day, self.day_calls = jour, 0
+        return self.day_calls < self.daily_max
+
     async def available(self) -> bool:
-        """Ollama tourne et le modèle est installé (vérifié au plus toutes les 10 min)."""
+        """Ollama tourne et le modèle est installé, ou la clé Gemini est acceptée (vérifié au plus toutes les 10 min)."""
         if not self.enabled:
+            return False
+        if self.provider == "gemini" and not self._quota_left():
             return False
         if time.time() < self._ok_until:
             return True
+        if self.provider == "gemini":
+            return await self._gemini_ok()
         try:
             async with self.http.get(f"{self.url}/api/tags", timeout=aiohttp.ClientTimeout(total=3)) as r:
                 data = await r.json(content_type=None)
@@ -143,9 +203,66 @@ class LocalLLM:
                      self.model)
         return ok
 
+    async def _gemini_ok(self) -> bool:
+        """La clé et le modèle existent ? (lecture de la fiche du modèle : ne consomme pas le quota)"""
+        try:
+            async with self.http.get(GEMINI_URL.format(model=self.model), headers={"x-goog-api-key": self.api_key},
+                                     timeout=aiohttp.ClientTimeout(total=8)) as r:
+                ok, statut = r.status == 200, r.status
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            ok, statut = False, "réseau"
+        if ok:
+            self._ok_until = time.time() + 600
+        else:
+            self._down_until = time.time() + 900
+            log.warning("API Gemini indisponible (%s : clé refusée ou modèle %s inconnu) : règles seules 15 min",
+                        statut, self.model)
+        return ok
+
+    async def _chat_gemini(self, prompt: str, schema: dict, images: list[str] | None) -> dict | None:
+        parts: list[dict] = [{"text": prompt}]
+        parts += [{"inlineData": {"mimeType": _mime(b), "data": b}} for b in images or []]
+        body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"temperature": 0, "responseMimeType": "application/json",
+                                     "responseSchema": gemini_schema(schema)}}
+        async with self._sem:
+            attente = self._next_call - time.time()
+            if attente > 0:
+                await asyncio.sleep(attente)
+            self._next_call = time.time() + GEMINI_MIN_INTERVAL_S
+            debut = time.time()
+            try:
+                async with self.http.post(GEMINI_URL.format(model=self.model) + ":generateContent", json=body,
+                                          headers={"x-goog-api-key": self.api_key},
+                                          timeout=aiohttp.ClientTimeout(total=TIMEOUT_S)) as r:
+                    statut, data = r.status, await r.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+                log.debug("API Gemini : %s", e)
+                return None
+            self.last_ms = int(1000 * (time.time() - debut))
+        self.day_calls += 1
+        if statut == 429:
+            self._down_until = time.time() + 900
+            log.warning("API Gemini : quota atteint (%d appels aujourd'hui) : règles seules 15 min", self.day_calls)
+            return None
+        if statut != 200:
+            if statut in (400, 401, 403):
+                self._down_until = time.time() + 3600
+            log.warning("API Gemini : erreur %s : %s", statut, str(data)[:200])
+            return None
+        self.calls += 1
+        try:
+            out = json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
+            return out if isinstance(out, dict) else None
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+
     async def _chat(self, prompt: str, schema: dict, images: list[str] | None = None) -> dict | None:
         if not await self.available():
             return None
+        if self.provider == "gemini":
+            return await self._chat_gemini(prompt, schema, images)
         msg = {"role": "user", "content": prompt}
         if images:
             msg["images"] = images
@@ -177,6 +294,10 @@ class LocalLLM:
 
     async def warm_up(self) -> None:
         """Charge le modèle dans la carte graphique au démarrage (sinon le 1er tweet attend ≈ 45 s)."""
+        if self.provider == "gemini":
+            if await self.available():   # pas de lecture « à vide » : le quota gratuit est compté
+                log.info("IA prête : %s", self.label)
+            return
         if await self.available():
             debut = time.time()
             await self.read_tweet("warm-up", "radar")

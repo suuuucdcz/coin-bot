@@ -96,6 +96,10 @@ class Config:
     llm_enabled: bool
     llm_url: str
     llm_model: str
+    llm_provider: str
+    gemini_api_key: str
+    gemini_model: str
+    llm_daily_max: int
 
     @property
     def rpc_url(self) -> str:
@@ -152,6 +156,10 @@ def load() -> Config:
         llm_enabled=_bool("LLM_ENABLED", True),
         llm_url=_env("LLM_URL") or "http://127.0.0.1:11434",
         llm_model=_env("LLM_MODEL") or "gemma4:e4b",
+        llm_provider=(_env("LLM_PROVIDER") or ("gemini" if _env("GEMINI_API_KEY") else "ollama")).lower(),
+        gemini_api_key=_env("GEMINI_API_KEY") or "",
+        gemini_model=_env("GEMINI_MODEL") or "gemini-3.5-flash-lite",
+        llm_daily_max=max(10, _int("LLM_DAILY_MAX", 450)),
     )
 
 

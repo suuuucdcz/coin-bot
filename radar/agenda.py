@@ -91,8 +91,13 @@ class Agenda:
         self._profiling: set[str] = set()
         self.jev = Jev(getattr(pipeline.cfg, "typesafe_api_key", ""), pipeline.http)
         cfg = pipeline.cfg
-        self.llm = LocalLLM(getattr(cfg, "llm_url", "http://127.0.0.1:11434"), getattr(cfg, "llm_model", "gemma4:e4b"),
-                            pipeline.http, getattr(cfg, "llm_enabled", False))
+        gemini = getattr(cfg, "llm_provider", "ollama") == "gemini" and getattr(cfg, "gemini_api_key", "")
+        self.llm = LocalLLM(getattr(cfg, "llm_url", "http://127.0.0.1:11434"),
+                            getattr(cfg, "gemini_model", "gemini-3.5-flash-lite") if gemini
+                            else getattr(cfg, "llm_model", "gemma4:e4b"),
+                            pipeline.http, getattr(cfg, "llm_enabled", False),
+                            provider="gemini" if gemini else "ollama", api_key=getattr(cfg, "gemini_api_key", ""),
+                            daily_max=getattr(cfg, "llm_daily_max", 450))
         self._last_plan = 0.0
         for r in self.db.announcements_since(int(time.time()) - MATCH_WINDOW_S):
             for c in json.loads(r["details"] or "{}").get("dev_candidates", []):
@@ -406,8 +411,11 @@ class Agenda:
 
     # ------------------------------------------------------------------ entrée : tweets
     @staticmethod
-    def _worth_reading(t: dict, info) -> bool:
-        """Tweets qui méritent l'IA : annonce probable, ticker, CA, ou image (l'heure est souvent dessus)."""
+    def _worth_reading(t: dict, info, strict: bool = False) -> bool:
+        """Tweets qui méritent l'IA : annonce probable, ticker, CA, ou image (l'heure est souvent dessus).
+        strict (quota gratuit de Gemini) : seulement ce que les règles prennent déjà pour une annonce."""
+        if strict:
+            return bool(info.is_candidate or info.cas)
         return bool(info.is_candidate or info.tickers or info.cas or t.get("images"))
 
     @staticmethod
@@ -479,12 +487,14 @@ class Agenda:
             if dt and datetime.now(timezone.utc) - dt > timedelta(hours=36):
                 continue
             info = parse_tweet(t.get("text", ""), dt, t.get("links"))
-            if lus >= READ_PER_BATCH and self._worth_reading(t, info) and await self.llm.available():
+            quota = min(READ_PER_BATCH, self.llm.per_batch)
+            strict = self.llm.provider == "gemini"   # quota gratuit : seulement les annonces probables
+            if lus >= quota and self._worth_reading(t, info, strict) and await self.llm.available():
                 # Quota de lecture atteint : relu au prochain passage plutôt que jugé sur les seules règles
                 # (vu en vrai : une recherche renvoyait 35 tweets, les 23 derniers entraient sans relecture)
                 self.db.unsee_tweet(url)
                 continue
-            if lus < READ_PER_BATCH and self._worth_reading(t, info) and await self.llm.available():
+            if lus < quota and self._worth_reading(t, info, strict) and await self.llm.available():
                 lus += 1
                 images = await fetch_images(self.p.http, t.get("images") or []) if t.get("images") else []
                 lu = await self.llm.read_tweet(t.get("text", ""), t.get("handle"), images)
@@ -526,6 +536,12 @@ class Agenda:
         ca = info.cas[0] if info.cas else None
         since = int(time.time()) - MATCH_WINDOW_S
         row = self.db.find_announcement(ticker, ca, since)
+        if row is None and not ca and not info.launch_ts and not (t.get("ai_local") or t.get("ai")):
+            # Règles seules (pas d'IA pour lire le tweet) : un ticker et un mot comme « launch » ne suffisent pas à
+            # créer une annonce (vu en vrai sur le serveur : une réponse, une promo et « use the launch pad »
+            # devenaient des lancements, et leur chasse au dev ajoutait 20 wallets inutiles). Il faut un CA ou une heure.
+            log.info("Ignoré (règles seules : ni CA ni heure de lancement) : %s", t.get("url"))
+            return
         if row and ca and row["ca"] and ca != row["ca"]:
             # Même ticker, AUTRE contrat que celui de l'annonce : copie ou autre projet. Pas fusionné :
             # on le vérifie comme un candidat (et il sera suivi comme copie possible).
@@ -1305,7 +1321,8 @@ class Agenda:
         except Exception:
             log.exception("Compartiment faux coins non mis à jour")
         await self._post_pending()
-        if time.time() - self._last_plan > PLAN_EVERY_S:
+        # Quota gratuit de Gemini : le chef d'orchestre passe toutes les 30 min au lieu de 10
+        if time.time() - self._last_plan > PLAN_EVERY_S * (3 if self.llm.provider == "gemini" else 1):
             self._last_plan = time.time()
             self.p._spawn(self._plan_x())
         day = datetime.now(PARIS).strftime("%Y-%m-%d")

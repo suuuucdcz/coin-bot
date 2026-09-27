@@ -277,8 +277,9 @@ class XWatcher:
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         if any(k in page.url for k in ("/login", "/i/flow", "/i/jf/", "onboarding", "/logout")):
             if not self._warned and self.on_problem:
-                self.on_problem("⚠️ Veille X : la session X est déconnectée. Double-clique sur "
-                                "<code>connexion_x.bat</code> (dossier du radar) pour te reconnecter.")
+                self.on_problem("⚠️ Veille X : la session X est déconnectée. Sur le PC, double-clique sur "
+                                "<code>connexion_x.bat</code>. Si le radar tourne sur un serveur : exporte ensuite la "
+                                "session et reprends-la sur le serveur (HEBERGEMENT.md, « Veille X refusée »).")
             self._warned = True
             return False
         self._warned = False

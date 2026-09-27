@@ -123,3 +123,61 @@ def test_promo_d_un_tiers_sans_ca_ni_heure_ne_cree_pas_d_annonce(tmp_path):
     # coin déjà à l'agenda : la promo devient une source de plus
     ag.db.insert_announcement(ticker="PAID", handle="UsePaid", tweet_url="u", status="annoncé")
     assert not ag._promo_only(parse_tweet("I bought $PAID", REF), promo)
+
+
+# --- API Gemini (serveur sans carte graphique) ------------------------------------------------------
+class FakeGemini:
+    """Faux serveur de l'API Gemini : fiche du modèle (GET) et generateContent (POST)."""
+    def __init__(self, reponse: dict, statut: int = 200):
+        self.reponse, self.statut, self.appels = reponse, statut, []
+
+    def get(self, url, headers=None, timeout=None):
+        return Rep({"name": "models/gemini-2.5-flash-lite"})
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.appels.append((url, json, headers))
+        return Rep({"candidates": [{"content": {"parts": [{"text": _json.dumps(self.reponse)}]}}]}, self.statut)
+
+
+def test_schema_converti_pour_gemini():
+    from radar.analysis.llm import TWEET_SCHEMA, gemini_schema
+    s = gemini_schema(TWEET_SCHEMA)
+    assert s["type"] == "OBJECT" and s["required"] == TWEET_SCHEMA["required"]
+    assert s["properties"]["ticker"] == {"type": "STRING", "nullable": True}
+    assert s["properties"]["type"]["enum"][0] == "annonce_projet"
+
+
+def test_lecture_par_l_api_gemini(monkeypatch):
+    import radar.analysis.llm as llmmod
+    monkeypatch.setattr(llmmod, "GEMINI_MIN_INTERVAL_S", 0)
+    http = FakeGemini(lu(ticker="ASH", heure="18:00", fuseau="UTC"))
+    llm = LocalLLM("", "gemini-2.5-flash-lite", http, provider="gemini", api_key="cle-test", daily_max=2)
+    r = asyncio.run(llm.read_tweet("$ASH launches 18:00 UTC", "AshbornCoin", ["iVBORw0KGgoAAAANSUhEUg=="]))
+    url, corps, entetes = http.appels[0]
+    assert r["heure"] == "18:00" and llm.per_batch == 4 and "(API Gemini)" in llm.label
+    assert entetes["x-goog-api-key"] == "cle-test" and "cle-test" not in url      # clé jamais dans l'adresse
+    assert corps["generationConfig"]["responseMimeType"] == "application/json"
+    assert corps["contents"][0]["parts"][1]["inlineData"]["mimeType"] == "image/png"
+    asyncio.run(llm.read_tweet("x", "y"))
+    assert asyncio.run(llm.available()) is False                                # plafond du jour atteint
+
+
+def test_quota_gemini_depasse_repli_sur_les_regles(monkeypatch):
+    import radar.analysis.llm as llmmod
+    monkeypatch.setattr(llmmod, "GEMINI_MIN_INTERVAL_S", 0)
+    llm = LocalLLM("", "gemini-2.5-flash-lite", FakeGemini({}, statut=429), provider="gemini", api_key="k")
+    assert asyncio.run(llm.read_tweet("$ASH", "a")) is None and llm.enabled is False
+
+
+def test_sans_cle_on_reste_sur_ollama():
+    assert LocalLLM("http://x", "gemma4:e4b", None, provider="gemini", api_key="").provider == "ollama"
+
+
+def test_regles_seules_ni_ca_ni_heure_pas_d_annonce(tmp_path):
+    # Vu en vrai sur le serveur sans IA : « use the @UsePaid launch pad… $JACK » devenait un lancement
+    from radar.db import DB
+    ag = Agenda.__new__(Agenda)
+    ag.db = DB(tmp_path / "radar.db")
+    t = {"url": "https://x.com/a/status/1", "handle": "Kingstaccz", "text": "use the launch pad $JACK"}
+    asyncio.run(ag.upsert(t, parse_tweet(t["text"], REF)))
+    assert ag.db.announcements_since(0) == []
