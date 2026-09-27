@@ -50,6 +50,7 @@ radar/
   top.py             # « ‼️ À ne pas rater » : sélection + contrôle du token 5 min après l'alerte
   smart.py           # smart money : gros détenteurs de plusieurs vrais succès -> alerte 🧠 quand ils entrent ensemble
   lancements.py      # tokens pump.fun qui décollent -> argent du créateur remonté -> wallet neuf d'un dev connu ?
+  toile.py           # « qui finance qui » pour CHAQUE token pump.fun (RPC publics) -> financeurs à succès suivis
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ
@@ -78,6 +79,11 @@ Règles ajoutées à l'usage :
   écarté ; 3 succès de 3 devs différents ; « À ne pas rater » à partir de 3 wallets ensemble (anti-appât).
 - **Traceur anti-leurre** : un premier funding < 0,05 SOL est comparé aux suivants de l'heure (vu sur $WAIF :
   0,01 SOL via relais 1 s avant les 200 SOL du bank). **Tempête** : > 600 notifications en 10 min = adresse coupée.
+- **Toile (`toile.py`)** : RPC publics gratuits seulement (publicnode : ~1,7 jour d'historique ; RPC officiel
+  `api.mainnet-beta` : historique complet, 0,5 req/s). Un lien n'entre que si le wallet est **confirmé neuf** par
+  l'historique complet (vu en vrai : wallets vidés puis refinancés, pris pour neufs sur publicnode). Succès = market
+  cap ≥ 50 k$ 24 h après la création (DexScreener). Financeur promu (« bank à succès », confiance « prouvé ») : ≥ 2
+  créateurs à succès, ≥ 25 % de réussite, ≤ 50 créateurs en 7 jours, pas un service.
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 

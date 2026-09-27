@@ -119,6 +119,26 @@ CREATE TABLE IF NOT EXISTS smart_hits (   -- gros détenteurs des vrais succès 
     ts      INTEGER,
     PRIMARY KEY (wallet, mint)
 );
+CREATE TABLE IF NOT EXISTS toile_wallets (   -- la toile : qui a financé chaque wallet NEUF (radar/toile.py)
+    address TEXT PRIMARY KEY,
+    statut  TEXT,          -- neuf, relais (sinon : reutilise, actif, inconnu = pas de lien sûr, gardé en cache)
+    source  TEXT,          -- premier financeur
+    sol     REAL,
+    ts      INTEGER,       -- heure du financement
+    racine  TEXT,          -- premier financeur en amont qui n'est ni un relais ni un wallet neuf
+    leurre  TEXT,          -- source d'un petit envoi-leurre écarté
+    vu      INTEGER        -- heure de la résolution
+);
+CREATE INDEX IF NOT EXISTS toile_racine ON toile_wallets(racine);
+CREATE TABLE IF NOT EXISTS toile_tokens (    -- tokens pump.fun créés par les wallets neufs de la toile
+    mint    TEXT PRIMARY KEY,
+    creator TEXT,
+    symbol  TEXT,
+    ts      INTEGER,
+    mc_24h  REAL           -- market cap 24 h après la création (NULL = pas encore mesurée)
+);
+CREATE INDEX IF NOT EXISTS toile_createur ON toile_tokens(creator);
+CREATE INDEX IF NOT EXISTS toile_a_mesurer ON toile_tokens(ts) WHERE mc_24h IS NULL;
 """
 
 
@@ -359,6 +379,73 @@ class DB:
     def results_since(self, since: int) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM results WHERE sent_at>=? ORDER BY sent_at", (since,)).fetchall()
 
+    # --- la toile (radar/toile.py) ------------------------------------------------------
+    def toile_wallet(self, address: str | None) -> sqlite3.Row | None:
+        if not address:
+            return None
+        return self.conn.execute("SELECT * FROM toile_wallets WHERE address=?", (address,)).fetchone()
+
+    def toile_put(self, address: str, statut: str, source: str | None = None, sol: float | None = None,
+                  ts: int | None = None, racine: str | None = None, leurre: str | None = None) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO toile_wallets VALUES(?,?,?,?,?,?,?,?)",
+                          (address, statut, source, sol, ts, racine, leurre, int(time.time())))
+        self.conn.commit()
+
+    def toile_add_token(self, mint: str, creator: str, symbol: str | None, ts: int) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO toile_tokens(mint, creator, symbol, ts) VALUES(?,?,?,?)",
+                          (mint, creator, symbol, ts))
+        self.conn.commit()
+
+    def toile_a_mesurer(self, avant: int, limit: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM toile_tokens WHERE mc_24h IS NULL AND ts <= ? ORDER BY ts LIMIT ?",
+                                 (avant, limit)).fetchall()
+
+    def toile_set_mc(self, valeurs: dict[str, float]) -> None:
+        self.conn.executemany("UPDATE toile_tokens SET mc_24h=? WHERE mint=?", [(v, m) for m, v in valeurs.items()])
+        self.conn.commit()
+
+    def toile_stats(self, racine: str, succes_mc: float, depuis: int) -> dict:
+        """Créateurs neufs financés par `racine` (via des relais compris) : combien, mesurés à 24 h, réussis, récents."""
+        r = self.conn.execute(
+            "SELECT COUNT(DISTINCT w.address) AS createurs,"
+            " COUNT(DISTINCT CASE WHEN t.mc_24h IS NOT NULL THEN w.address END) AS juges,"
+            " COUNT(DISTINCT CASE WHEN t.mc_24h >= ? THEN w.address END) AS succes,"
+            " COUNT(DISTINCT CASE WHEN w.vu >= ? THEN w.address END) AS recents "
+            "FROM toile_wallets w JOIN toile_tokens t ON t.creator = w.address WHERE w.racine = ?",
+            (succes_mc, depuis, racine)).fetchone()
+        return dict(r)
+
+    def toile_succes(self, racine: str, succes_mc: float, limit: int = 3) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT t.* FROM toile_tokens t JOIN toile_wallets w ON w.address = t.creator "
+            "WHERE w.racine = ? AND t.mc_24h >= ? ORDER BY t.mc_24h DESC LIMIT ?", (racine, succes_mc, limit)).fetchall()
+
+    def toile_resume(self, succes_mc: float) -> dict:
+        n = dict(self.conn.execute("SELECT statut, COUNT(*) FROM toile_wallets GROUP BY statut").fetchall())
+        t = self.conn.execute("SELECT COUNT(*), COUNT(mc_24h), SUM(mc_24h >= ?) FROM toile_tokens",
+                              (succes_mc,)).fetchone()
+        n["financeurs"] = self.conn.execute(
+            "SELECT COUNT(DISTINCT racine) FROM toile_wallets WHERE statut = 'neuf'").fetchone()[0]
+        n.update(tokens=t[0], mesures=t[1], succes=t[2] or 0)
+        return n
+
+    def toile_purge(self, cache_avant: int, garde_avant: int, succes_mc: float) -> int:
+        """Cache des wallets sans lien sûr : quelques jours. Toile : deux mois, sauf les succès (gardés)."""
+        n = self.conn.execute("DELETE FROM toile_wallets WHERE statut NOT IN ('neuf', 'relais') AND vu < ?",
+                              (cache_avant,)).rowcount
+        n += self.conn.execute("DELETE FROM toile_tokens WHERE ts < ? AND COALESCE(mc_24h, 0) < ?",
+                               (garde_avant, succes_mc)).rowcount
+        n += self.conn.execute("DELETE FROM toile_wallets WHERE vu < ? AND address NOT IN "
+                               "(SELECT creator FROM toile_tokens)", (garde_avant,)).rowcount
+        self.conn.commit()
+        return n
+
+    def set_wallet_role(self, address: str, label: str, grp: str, role: str, depth: int) -> None:
+        """Nouvelle identité d'un wallet déjà en base (ex. : un financeur promu par la toile)."""
+        self.conn.execute("UPDATE wallets SET label=?, grp=?, role=?, depth=? WHERE address=?",
+                          (label, grp, role, depth, address))
+        self.conn.commit()
+
     # --- remise à zéro ----------------------------------------------------------------
     # Toujours effacés : l'historique et les compteurs (alertes, agenda, tokens, résultats, compteurs d'activité).
     # Toujours gardés : configuration Telegram (sections, messages épinglés), réglages (son, sourdines), compteurs
@@ -366,8 +453,9 @@ class DB:
     RESET_TABLES = ("alerts", "results", "announcements", "tokens", "tweets_seen", "networks")
     RESET_KEYS = ("ann_seen:", "buys:", "creates:", "grp_tokens:", "daily_report", "discovery_last")
     # Avec tout=True, en plus : ce que le radar a APPRIS (wallets ajoutés, liens, étiquettes, classements)
-    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts", "smart_hits")
-    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:", "smart_vu:", "tempete:")
+    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts", "smart_hits", "toile_wallets", "toile_tokens")
+    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:", "smart_vu:", "tempete:",
+                    "toile_promu:", "toile_service:")
 
     def remise_a_zero(self, tout: bool = False) -> dict[str, int]:
         """Efface l'historique et les compteurs (voir RESET_*). tout=True : repart aussi de la watchlist de départ."""

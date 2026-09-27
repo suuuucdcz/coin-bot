@@ -25,6 +25,7 @@ from .confiance import watch_priority
 from .results import Results
 from .lancements import LaunchWatch
 from .smart import SmartMoney
+from .toile import Toile
 from .sources import pumpportal
 from .sources.helius import LogsWatcherPool, RpcError, SolanaRPC, in_background, notable_logs
 from .sources.x_watch import XWatcher, has_session
@@ -126,11 +127,15 @@ async def amain() -> int:
                 log.warning("Veille X désactivée : pas encore de session X (%s)", cfgmod.AIDE_X)
 
         pipeline.lancements = LaunchWatch(pipeline)   # remontée des lancements qui décollent (🔗)
+        if cfg.toile_enabled:
+            pipeline.toile = Toile(pipeline)           # qui finance qui, pour chaque token pump.fun (RPC publics)
 
         async def on_new_token(msg: dict) -> None:
             await pipeline.on_pumpportal_create(msg)
             await agenda.on_new_token(msg)
             pipeline.lancements.on_new_token(msg)
+            if pipeline.toile is not None:
+                pipeline.toile.on_new_token(msg)
 
         heure: dict[str, deque] = defaultdict(deque)
         bavards: dict[str, float] = {}
@@ -283,6 +288,8 @@ async def amain() -> int:
                         await watcher.add(a)   # fin de la pause d'une adresse de la watchlist de départ
                 if tours % 4 == 0 and pipeline.lancements is not None:
                     log.info("%s", pipeline.lancements.status_line())
+                if tours % 4 == 0 and pipeline.toile is not None:
+                    log.info("%s", pipeline.toile.status_line())
                 if tours % 4 == 0:
                     log.info("RPC par méthode depuis le démarrage : %s",
                              ", ".join(f"{m} {n}" for m, n in rpc.by_method.most_common(8)))
@@ -394,6 +401,8 @@ async def amain() -> int:
             "🟣 Nouveaux tokens pump.fun : PumpPortal",
             f"🐦 Veille X : active (rythme lent{pause})" if xwatcher else f"⚠️ Veille X : inactive ({cfgmod.AIDE_X})",
             f"🧭 Découverte auto de devs : toutes les {cfg.discovery_every_h} h" if cfg.discovery_enabled else None,
+            "🕸️ Toile : chaque token pump.fun relié à son financeur (RPC publics gratuits)" if cfg.toile_enabled
+            else None,
             (f"🧠 IA pour lire les tweets : {esc(agenda.llm.label)}" if agenda.llm.enabled_cfg
              else "🧠 IA pour lire les tweets : désactivée (règles strictes seules)"),
             "🤖 IA Jev : active (avis en plus des règles)" if cfg.typesafe_api_key else None,
@@ -414,9 +423,13 @@ async def amain() -> int:
             tasks.append(in_background(xwatcher.run()))
         if cfg.discovery_enabled:
             tasks.append(in_background(discovery_loop()))
+        if pipeline.toile is not None:
+            tasks += pipeline.toile.taches()
         try:
             await asyncio.gather(*tasks)
         finally:
+            if pipeline.toile is not None:
+                await pipeline.toile.close()
             await tg.close()
             db.close()
     return 0

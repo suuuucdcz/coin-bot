@@ -20,6 +20,7 @@ import logging
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 import aiohttp
 
@@ -90,6 +91,41 @@ def look_alike(a: str, b: str) -> bool:
     return a != b and a[:4] == b[:4] and a[-4:] == b[-4:]
 
 
+async def scan_funding(address: str, ok: list[dict], fetch: Callable[[str], Awaitable[dict | None]],
+                       max_tx: int = 8) -> dict | None:
+    """Premier financement de `address` parmi ses transactions réussies `ok` (de la plus ancienne à la plus récente).
+
+    Source = le compte dont le solde SOL baisse le plus. Un premier envoi minuscule (leurre anti-traceur) est
+    remplacé par un envoi au moins 5 fois plus gros dans l'heure qui suit. Partagé par le traceur (Helius) et la
+    toile (RPC publics) : la même règle partout. Renvoie {source, amount, signature, ts[, leurre]} ou None.
+    """
+    premier, debut = None, 0
+    for s in ok[:max_tx]:
+        if premier and (s.get("blockTime") or 0) - debut > DECOY_WINDOW_S:
+            break
+        tx = await fetch(s["signature"])
+        if not tx:
+            continue
+        deltas = sol_deltas(tx)
+        recu = deltas.get(address, 0.0)
+        if recu <= DUST_SOL:
+            continue  # frais payés, dust, poisoning… on passe à la suivante
+        perdants = [(d, k) for k, d in deltas.items() if k != address and d < 0 and not look_alike(k, address)]
+        if not perdants:
+            continue
+        _, source = min(perdants)
+        funding = {"source": source, "amount": round(recu, 6), "signature": s["signature"],
+                   "ts": tx.get("blockTime") or s.get("blockTime") or 0}
+        if premier is None:
+            if recu >= DECOY_MAX_SOL:
+                return funding
+            premier, debut = funding, s.get("blockTime") or funding["ts"]   # leurre possible : on regarde la suite
+        elif recu >= DECOY_RATIO * premier["amount"] and recu >= DECOY_MAX_SOL:
+            funding["leurre"] = {"source": premier["source"], "amount": premier["amount"]}
+            return funding
+    return premier
+
+
 class Tracer:
     def __init__(self, rpc: SolanaRPC, hot_threshold: int = 1000, known: dict[str, str] | None = None):
         self.rpc = rpc
@@ -108,32 +144,9 @@ class Tracer:
         if truncated:
             return None, None, "plus de 10 000 tx : adresse très active (service / exchange ?), remontée arrêtée"
         ok = [s for s in reversed(sigs) if s.get("err") is None]  # de la plus ancienne à la plus récente
-        premier, debut = None, 0
-        for s in ok[:8]:
-            if premier and (s.get("blockTime") or 0) - debut > DECOY_WINDOW_S:
-                break
-            tx = await self.rpc.transaction(s["signature"])
-            if not tx:
-                continue
-            deltas = sol_deltas(tx)
-            recu = deltas.get(address, 0.0)
-            if recu <= DUST_SOL:
-                continue  # frais payés, dust, poisoning… on passe à la suivante
-            perdants = [(d, k) for k, d in deltas.items() if k != address and d < 0 and not look_alike(k, address)]
-            if not perdants:
-                continue
-            _, source = min(perdants)
-            funding = {"source": source, "amount": round(recu, 6), "signature": s["signature"],
-                       "ts": tx.get("blockTime") or s.get("blockTime") or 0}
-            if premier is None:
-                if recu >= DECOY_MAX_SOL:
-                    return funding, len(sigs), ""
-                premier, debut = funding, s.get("blockTime") or funding["ts"]   # leurre possible : on regarde la suite
-            elif recu >= DECOY_RATIO * premier["amount"] and recu >= DECOY_MAX_SOL:
-                funding["leurre"] = {"source": premier["source"], "amount": premier["amount"]}
-                return funding, len(sigs), ""
-        if premier:
-            return premier, len(sigs), ""
+        funding = await scan_funding(address, ok, self.rpc.transaction)
+        if funding:
+            return funding, len(sigs), ""
         return None, len(sigs), "aucune entrée de SOL identifiable dans les premières transactions"
 
     async def hot_check(self, source: str, before_sig: str) -> tuple[bool, str]:

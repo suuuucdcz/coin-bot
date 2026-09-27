@@ -20,8 +20,9 @@ def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | fr
     """Confiance dans un wallet suivi, selon COMMENT il a été trouvé.
 
     référence : watchlist de départ (hors cluster de rugs) · prouvé : dev d'un vrai succès (vérifié
-    DexScreener) ou dev relié à un compte X par un lien dans les deux sens · lié : financé directement par
-    un wallet de confiance, ou adresse publiée par le compte officiel · faible : tout le reste (satellites,
+    DexScreener), financeur à succès mesuré par la toile, ou dev relié à un compte X par un lien dans les deux
+    sens · lié : financé directement par un wallet de confiance, ou adresse publiée par le compte officiel ·
+    faible : tout le reste (satellites,
     acheteurs, détenteurs, créateurs ou financeurs de faux coins, chaînes de financement lointaines).
     Vu en vrai : 30 alertes « le cluster entre » déclenchées par les acheteurs d'un faux coin = une ferme de bots.
     """
@@ -36,6 +37,8 @@ def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | fr
         return "référence"
     if r.startswith("dev (découverte"):
         return "prouvé"
+    if r.startswith("bank à succès (toile"):
+        return "prouvé"   # mesuré par la toile : au moins 2 créateurs neufs financés encore à 50 k$ après 24 h
     if r.startswith("dev probable") and "renvoie vers" in r:
         return "prouvé"   # CA publié par le compte officiel ET le token renvoie vers lui
     if r.startswith("dev probable") and "adresse publiée par" in r:

@@ -109,6 +109,10 @@ class Config:
     gemini_api_key: str
     gemini_model: str
     llm_daily_max: int
+    # Toile (radar/toile.py) : RPC publics gratuits, jamais Helius
+    toile_enabled: bool = True
+    toile_rpc_url: str = "https://solana-rpc.publicnode.com"         # rapide, ~1,7 jour d'historique
+    toile_archive_url: str = "https://api.mainnet-beta.solana.com"   # historique complet, débit limité
 
     @property
     def rpc_url(self) -> str:
@@ -169,6 +173,9 @@ def load() -> Config:
         gemini_api_key=_env("GEMINI_API_KEY") or "",
         gemini_model=_env("GEMINI_MODEL") or "gemini-3.5-flash-lite",
         llm_daily_max=max(10, _int("LLM_DAILY_MAX", 450)),
+        toile_enabled=_bool("TOILE", True),
+        toile_rpc_url=_env("TOILE_RPC_URL") or "https://solana-rpc.publicnode.com",
+        toile_archive_url=_env("TOILE_ARCHIVE_URL") or "https://api.mainnet-beta.solana.com",
     )
 
 

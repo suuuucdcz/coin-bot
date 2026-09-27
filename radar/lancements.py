@@ -5,8 +5,9 @@ leur bank est surveillé. Ici, il part dans l'autre sens :
   0. dès la création : si le créateur est déjà connu de la base (même hors watchlist), alerte immédiate ;
   1. sinon, chaque nouveau token pump.fun (flux PumpPortal, gratuit) est mis de côté ;
   2. entre 3 et 10 min après sa création, DexScreener (gratuit, par lots de 30) dit s'il décolle vraiment ;
-  3. pour ceux qui décollent seulement (quelques %), l'argent du créateur est remonté (traceur anti-leurre ;
-     les petits relais sont suivis sur 3 niveaux ; ~3 à 8 crédits Helius, plafonné par heure) ;
+  3. pour ceux qui décollent seulement (quelques %), l'argent du créateur est remonté : d'abord par la toile
+     (radar/toile.py, déjà fait à la création avec des RPC publics, 0 crédit), sinon par le traceur anti-leurre
+     (les petits relais sont suivis sur 3 niveaux ; ~3 à 8 crédits Helius, plafonné par heure) ;
   4. si l'argent vient d'un wallet que le radar connaît (dev ou bank propre, même sorti de la watchlist) :
      « 🔴 NOUVEAU WALLET D'UN DEV CONNU » ; s'il vient d'un réseau à rugs : ⛔ dans 🏴‍☠️ Arnaques.
 Le créateur entre alors dans la watchlist (ses ventes, ses fundings, son prochain token seront vus).
@@ -54,7 +55,7 @@ class LaunchWatch:
             return   # un créateur déjà suivi est traité en direct par le pipeline
         self.stats["vus"] += 1
         t = {"mint": mint, "creator": creator, "ts": time.time(), "symbol": msg.get("symbol"), "name": msg.get("name")}
-        connu = self._connu(creator)
+        connu = self.connu(creator)
         if connu is not None:
             # Créateur déjà connu de la base (sorti de la watchlist, ou jamais suivi mais relié par un lien) :
             # alerte dès la création, sans attendre de voir s'il décolle. Recherche en base : aucun crédit.
@@ -88,18 +89,19 @@ class LaunchWatch:
         self.stats["decollent"] += len(decollent)
         trouves = []
         for t in sorted(decollent, key=lambda t: t["mc"], reverse=True):
+            gratuit = self.p.toile is not None and self.p.toile.chaine(t["creator"]) is not None
             while self._traces and now - self._traces[0] > 3600:
                 self._traces.popleft()
-            if len(self._traces) >= TRACES_PER_HOUR:
+            if not gratuit and len(self._traces) >= TRACES_PER_HOUR:
                 log.info("Remontées : plafond horaire atteint (%d), %s non remonté", TRACES_PER_HOUR, t["mint"][:6])
-                break
+                continue
             res = await self.remonter(t)
             if res:
                 trouves.append(res)
         return trouves
 
     # --- 3. d'où vient l'argent du créateur ? ------------------------------------------------------------
-    def _connu(self, adresse: str) -> tuple[str, object] | None:
+    def connu(self, adresse: str) -> tuple[str, object] | None:
         """(« bon » | « rug », ligne du wallet connu) si le radar connaît déjà ce wallet, même hors watchlist."""
         db = self.p.db
         w = db.wallet(adresse)
@@ -119,12 +121,20 @@ class LaunchWatch:
         return None
 
     async def remonter(self, t: dict) -> dict | None:
-        self._traces.append(time.time())
         self.stats["remontes"] += 1
         creator = t["creator"]
-        connu = self._connu(creator)   # dev déjà connu (sorti de la watchlist) : aucun crédit dépensé
+        connu = self.connu(creator)   # dev déjà connu (sorti de la watchlist) : aucun crédit dépensé
         chaine: list[dict] = []
-        if connu is None:
+        toile = self.p.toile.chaine(creator) if self.p.toile is not None else None
+        if connu is None and toile is not None:
+            # Déjà remonté par la toile (RPC publics, même règle anti-leurre) : aucun crédit Helius
+            for h in toile:
+                chaine.append(h)
+                connu = self.connu(h["src"])
+                if connu is not None:
+                    break
+        elif connu is None:
+            self._traces.append(time.time())
             tracer = Tracer(self.p.rpc, self.p.cfg.hot_wallet_tx_threshold,
                             {a: lab for a, lab in self.p.labels.items() if is_service(None, lab)})
             cur = creator
@@ -140,7 +150,7 @@ class LaunchWatch:
                 chaine.append({"src": src, "sol": funding["amount"], "leurre": funding.get("leurre")})
                 if is_service(self.p.db.wallet(src), self.p.db.get_label(src)):
                     break   # financé par un exchange : anonyme
-                connu = self._connu(src)
+                connu = self.connu(src)
                 if connu is not None:
                     break
                 # Relais (quelques tx) : on remonte encore ; sinon c'est un wallet inconnu, on s'arrête
