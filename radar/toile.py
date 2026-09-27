@@ -28,7 +28,7 @@ from collections import Counter, deque
 from . import alerts as A
 from .alerte import Alert
 from .analysis.tracer import HOT_WINDOW_S, scan_funding
-from .confiance import TRUSTED, is_service
+from .confiance import TRUSTED
 from .sources import dexscreener
 from .sources.helius import LAMPORTS, RpcError, SolanaRPC, account_keys
 from .telegram import esc
@@ -235,12 +235,14 @@ class Toile:
                 and st["recents"] <= MAX_CREATEURS_7J)
 
     def service_connu(self, adresse: str) -> bool:
-        return is_service(self.db.wallet(adresse), self.db.get_label(adresse)) \
-            or self.db.get(f"toile_service:{adresse}") == "1"
+        return self.p.is_service_address(adresse)
 
     async def est_service(self, adresse: str) -> bool:
-        """Exchange, bridge, bot de paiement : trop de tx en quelques heures (même règle que le traceur)."""
+        """Exchange, bridge, bot de paiement : étiqueté, trop de wallets neufs financés en 7 jours, ou trop de tx en
+        quelques heures (même règle que le traceur ; 1 appel publicnode, mémorisé)."""
         if self.service_connu(adresse):
+            return True
+        if self.db.toile_clients(adresse, int(time.time() - 7 * 86400)) > MAX_CREATEURS_7J:
             return True
         if self.db.get(f"toile_service:{adresse}") == "0":
             return False
@@ -255,7 +257,7 @@ class Toile:
 
     async def examiner(self, racine: str) -> bool:
         """Promeut la racine si elle vient de passer le seuil (une seule fois)."""
-        if self.db.get(f"toile_promu:{racine}") or self.db.get(f"toile_service:{racine}") == "1":
+        if self.db.get(f"toile_promu:{racine}") or self.service_connu(racine):
             return False
         st = self.stats_racine(racine)
         if not self.qualifie(st):
@@ -296,6 +298,25 @@ class Toile:
         return True
 
     # --- 5. alerte à la création -------------------------------------------------------------------------
+    async def relier(self, creator: str) -> tuple[tuple[str, object], list[dict]] | None:
+        """Premier maillon de la chaîne déjà connu du radar ((genre, wallet), maillons jusqu'à lui). Un exchange ou
+        un service coupe la chaîne : ses clients n'ont rien en commun (vu en vrai : Binance)."""
+        lw = self.p.lancements
+        chaine = self.chaine(creator) or []
+        for i, h in enumerate(chaine):
+            if self.service_connu(h["src"]):
+                return None
+            connu = lw.connu(h["src"]) if lw is not None else None
+            if connu is None:
+                continue
+            for maillon in chaine[:i + 1]:   # vérifié seulement quand il y a un lien (1 appel par financeur, mémorisé)
+                if await self.est_service(maillon["src"]):
+                    log.info("Toile : %s relié à %s via un service (%s), ignoré", creator[:6], connu[1]["label"],
+                             maillon["src"][:6])
+                    return None
+            return connu, chaine[:i + 1]
+        return None
+
     async def evaluer(self, t: dict, w) -> dict | None:
         """Nouveau token d'un wallet neuf : sa racine passe-t-elle le seuil ? un maillon est-il déjà connu ?"""
         if w["racine"]:
@@ -303,21 +324,17 @@ class Toile:
         lw = self.p.lancements
         if lw is None or t["creator"] in self.p.watched:
             return None   # créateur déjà suivi : le pipeline l'alerte en direct
-        chaine = self.chaine(t["creator"]) or []
-        for i, h in enumerate(chaine):
-            connu = lw.connu(h["src"])
-            if connu is None:
-                continue
-            genre, row = connu
-            lw.pending.pop(t["mint"], None)   # déjà relié : pas de seconde remontée par Helius
-            self.stats["alertes"] += 1
-            res = {**t, "mc": None, "txns": None, "genre": genre, "wallet": row["address"], "label": row["label"],
-                   "grp": row["grp"], "role": row["role"], "depth": row["depth"], "chaine": chaine[:i + 1]}
-            log.info("Toile : %s ($%s) relié dès la création à %s (%s)", t["mint"][:6], t.get("symbol"), row["label"],
-                     genre)
-            await lw.alerter(res)
-            return res
-        return None
+        relie = await self.relier(t["creator"])
+        if relie is None:
+            return None
+        (genre, row), chaine = relie
+        lw.pending.pop(t["mint"], None)   # déjà relié : pas de seconde remontée par Helius
+        self.stats["alertes"] += 1
+        res = {**t, "mc": None, "txns": None, "genre": genre, "wallet": row["address"], "label": row["label"],
+               "grp": row["grp"], "role": row["role"], "depth": row["depth"], "chaine": chaine}
+        log.info("Toile : %s ($%s) relié dès la création à %s (%s)", t["mint"][:6], t.get("symbol"), row["label"], genre)
+        await lw.alerter(res)
+        return res
 
     # --- suivi ------------------------------------------------------------------------------------------
     def status_line(self) -> str:

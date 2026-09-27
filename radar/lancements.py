@@ -102,8 +102,14 @@ class LaunchWatch:
 
     # --- 3. d'où vient l'argent du créateur ? ------------------------------------------------------------
     def connu(self, adresse: str) -> tuple[str, object] | None:
-        """(« bon » | « rug », ligne du wallet connu) si le radar connaît déjà ce wallet, même hors watchlist."""
+        """(« bon » | « rug », ligne du wallet connu) si le radar connaît déjà ce wallet, même hors watchlist.
+
+        Jamais pour un exchange : vu en vrai, un wallet chaud de Binance avait financé le dev d'un faux coin ; tous ses
+        clients passaient pour le même réseau à rugs.
+        """
         db = self.p.db
+        if self.p.is_service_address(adresse):
+            return None
         w = db.wallet(adresse)
         if w is not None:
             grp = w["grp"] or ""
@@ -128,11 +134,9 @@ class LaunchWatch:
         toile = self.p.toile.chaine(creator) if self.p.toile is not None else None
         if connu is None and toile is not None:
             # Déjà remonté par la toile (RPC publics, même règle anti-leurre) : aucun crédit Helius
-            for h in toile:
-                chaine.append(h)
-                connu = self.connu(h["src"])
-                if connu is not None:
-                    break
+            relie = await self.p.toile.relier(creator)
+            if relie is not None:
+                connu, chaine = relie
         elif connu is None:
             self._traces.append(time.time())
             tracer = Tracer(self.p.rpc, self.p.cfg.hot_wallet_tx_threshold,

@@ -415,6 +415,11 @@ class DB:
             (succes_mc, depuis, racine)).fetchone()
         return dict(r)
 
+    def toile_clients(self, racine: str, depuis: int) -> int:
+        """Wallets neufs (et relais) financés par `racine` depuis `depuis` : des centaines = un service."""
+        return self.conn.execute("SELECT COUNT(*) FROM toile_wallets WHERE racine = ? AND vu >= ?",
+                                 (racine, depuis)).fetchone()[0]
+
     def toile_succes(self, racine: str, succes_mc: float, limit: int = 3) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT t.* FROM toile_tokens t JOIN toile_wallets w ON w.address = t.creator "

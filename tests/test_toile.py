@@ -239,3 +239,31 @@ def test_menage(setup):  # noqa: F811
     db.toile_purge(now - T.CACHE_JOURS * 86400, now - T.GARDE_JOURS * 86400, T.SUCCES_MC)
     restes = {r[0] for r in db.conn.execute("SELECT address FROM toile_wallets")}
     assert restes == {"OKneuf"}   # le succès reste, le reste part
+
+
+def test_exchange_qui_a_finance_un_faux_coin_ne_relie_pas_ses_clients(setup):  # noqa: F811
+    # Vu en vrai le 27/09 : 5tzFki (Binance) avait financé DEV_FAKE_DOG ; un client de Binance est parti en ⛔
+    db, tg = setup
+    pub = FakePublic()
+    binance = "5tzFtoilexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    fake_dev = "DhqjtoileDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+    db.add_wallet(fake_dev, "DEV_FAKE_DOG", "faux-coins", "dev probable : créateur du faux coin $DOG", 1, None)
+    db.add_link(binance, fake_dev, "funding", 3.0, "sigdog", 1000)
+    p, t = _toile(db, tg, pub)
+    assert p.lancements.connu(binance)[0] == "rug"                       # sans le garde-fou : tous ses clients ⛔
+    pub.hist[binance] = [(f"x{i}", 10_000 - i) for i in range(1000)]    # 1 000 tx en quelques minutes
+    client = "C8clientcccccccccccccccccccccccccccccccccc"
+    pub.neuf(client, src=binance)
+    assert _token(t, client, "MINT8") is None
+    assert not any("RÉSEAU À RUGS" in s for s in tg.sent) and db.get(f"toile_service:{binance}") == "1"
+    assert p.lancements.connu(binance) is None                           # reconnu : plus jamais « connu »
+    # Déjà étiqueté exchange dans la base : coupé sans le moindre appel
+    autre = "HOTWtoileyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    db.set_label(autre, "Binance (hot wallet)")
+    db.add_link(autre, fake_dev, "funding", 1.0, "sigdog2", 1000)
+    client2 = "C9clientdddddddddddddddddddddddddddddddddd"
+    pub.neuf(client2, src=autre)
+    avant = pub.calls
+    _token(t, client2, "MINT9")
+    assert not any("RÉSEAU À RUGS" in s for s in tg.sent)
+    assert pub.calls - avant == 2      # signatures + 1re tx du client ; ni test de relais, ni test de service

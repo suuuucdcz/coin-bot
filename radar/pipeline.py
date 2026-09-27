@@ -146,6 +146,13 @@ class Pipeline(TopMixin, EvenementsMixin):
     def bad_groups(self) -> set[str]:
         return set(self.cfg.rug_groups)
 
+    def is_service_address(self, address: str | None) -> bool:
+        """Exchange, bridge, bot de paiement, usine à tokens : étiqueté, ou reconnu par la toile (trop de tx)."""
+        if not address:
+            return False
+        return is_service(self.db.wallet(address), self.db.get_label(address)) \
+            or self.db.get(f"toile_service:{address}") == "1"
+
     def is_smart(self, address: str) -> bool:
         w = self.db.wallet(address)
         return bool(w and is_smart_role(w["role"]))
