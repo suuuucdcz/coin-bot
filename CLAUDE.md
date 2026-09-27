@@ -47,6 +47,8 @@ radar/
   pipeline.py        # cœur : watchlist, confiance, « À ne pas rater », envoi ; evenements.py = un handler par événement
   agenda*.py         # veille X -> agenda (agenda_candidats, agenda_faux, agenda_affichage, agenda_outils)
   results.py         # suivi 24 h de chaque alerte (section 📈 Résultats, /resultats)
+  top.py             # « ‼️ À ne pas rater » : sélection + contrôle du token 5 min après l'alerte
+  smart.py           # smart money : gros détenteurs de plusieurs vrais succès -> alerte 🧠 quand ils entrent ensemble
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ
@@ -69,6 +71,8 @@ Règles ajoutées à l'usage :
   heure, seule une annonce confirmée par l'IA crée une fiche d'agenda ; sans IA, il faut un CA ou une heure.
 - **Serveur (Google Cloud e2-micro, `deploy/installer_serveur.sh`, `HEBERGEMENT.md`)** : un seul radar par bot (le radar
   prévient s'il en voit un 2e) ; `X_LIGHT=1` (navigateur allégé, fermé entre deux tours) et swap zram sur 1 Go.
+- **Smart money (`smart.py`)** : seulement les succès de devs « découverte » (propres) ; parts identiques = bundle
+  écarté ; 3 succès de 3 devs différents ; « À ne pas rater » à partir de 3 wallets ensemble (anti-appât).
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 
