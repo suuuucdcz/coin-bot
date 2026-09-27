@@ -342,7 +342,13 @@ class XWatcher:
             if not await self._goto(page, f"https://x.com/{handle}/about"):
                 return {}
             await asyncio.sleep(random.uniform(2, 3))
-            text = await page.evaluate("() => (document.querySelector('main') || document.body).innerText")
+            text = ""
+            # Petit serveur : la page met parfois plus de 10 s à s'afficher (vu en vrai : texte vide)
+            for _ in range(8 if getattr(self.cfg, "x_light", False) else 1):
+                text = await page.evaluate("() => (document.querySelector('main') || document.body).innerText")
+                if text and text.strip():
+                    break
+                await asyncio.sleep(3)
         except Exception as e:
             log.debug("Page À propos de @%s illisible : %s", handle, e)
             return {}
