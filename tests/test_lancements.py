@@ -98,3 +98,19 @@ def test_plafond_horaire_des_remontees(setup, monkeypatch):  # noqa: F811
         _token(w, f"M{i}", 200, creator=f"INCONNU{i}" + "i" * 33)
     asyncio.run(w.check_once())
     assert w.stats["decollent"] == 5 and w.stats["remontes"] == 2
+
+
+def test_createur_deja_connu_alerte_des_la_creation(setup, monkeypatch):  # noqa: F811
+    # Un dev connu, sorti de la watchlist, relance avec le même wallet : alerte immédiate, sans attendre 3 min
+    db, tg = setup
+    db.add_wallet(DEV_WEPE, "DEV_WEPE", "découverte", "dev (découverte : $WEPE, MC 11.5 M$ vérifiée DexScreener)", 0, None)
+    db.deactivate([DEV_WEPE])
+    p, w = _veille(db, tg, monkeypatch, {})
+
+    async def go():
+        w.on_new_token({"mint": "MINTnouveau", "traderPublicKey": DEV_WEPE, "symbol": "NEW", "name": "New"})
+        for _ in range(40):
+            await asyncio.sleep(0)
+    asyncio.run(go())
+    assert "MINTnouveau" not in w.pending and w.stats["trouves"] == 1
+    assert any("NOUVEAU WALLET D'UN DEV CONNU" in t and "dès la création" in t for t in tg.sent)

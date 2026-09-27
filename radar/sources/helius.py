@@ -269,7 +269,7 @@ class LogsWatcher:
     """Websocket Helius : notifie chaque transaction qui mentionne un wallet suivi."""
 
     def __init__(self, ws_url: str, on_signature: OnSignature,
-                 on_connect: Callable[[], Awaitable[None]] | None = None):
+                 on_connect: Callable[["LogsWatcher"], Awaitable[None]] | None = None):
         self.ws_url = ws_url
         self.on_signature = on_signature
         self.on_connect = on_connect
@@ -332,7 +332,7 @@ class LogsWatcher:
                     self.down_since = None
                     self.connected.set()
                     if self.on_connect:
-                        asyncio.create_task(self.on_connect())
+                        asyncio.create_task(self.on_connect(self))   # rattrapage de CETTE connexion
                     async for raw in ws:
                         await self._handle(raw)
             except asyncio.CancelledError:
@@ -397,3 +397,56 @@ def sol_deltas(tx: dict) -> dict[str, float]:
 
 def fee_payer(tx: dict) -> str:
     return account_keys(tx)[0]
+
+
+PER_CONNECTION = 900     # plan gratuit Helius : 1 000 abonnements par connexion (on garde de la marge)
+MAX_CONNECTIONS = 5      # plan gratuit Helius : 5 connexions websocket simultanées
+
+
+class LogsWatcherPool:
+    """Plusieurs connexions websocket Helius (900 wallets chacune, 5 au plus) derrière la même interface que
+    LogsWatcher. Un wallet qui dort ne coûte presque rien : c'est le nombre d'abonnements qui limitait (1 connexion)."""
+
+    def __init__(self, ws_url: str, on_signature: OnSignature,
+                 on_connect: Callable[[LogsWatcher], Awaitable[None]] | None = None, capacity: int = 900):
+        n = max(1, min(MAX_CONNECTIONS, -(-capacity // PER_CONNECTION)))
+        self.shards = [LogsWatcher(ws_url, on_signature, on_connect) for _ in range(n)]
+
+    @property
+    def addresses(self) -> set[str]:
+        return set().union(*(c.addresses for c in self.shards))
+
+    @property
+    def down_since(self) -> float | None:
+        coupees = [c.down_since for c in self.shards if c.down_since is not None]
+        return min(coupees) if coupees else None
+
+    @property
+    def last_notification(self) -> float:
+        return max(c.last_notification for c in self.shards)
+
+    def _shard_of(self, address: str) -> LogsWatcher | None:
+        return next((c for c in self.shards if address in c.addresses), None)
+
+    def add_initial(self, addresses) -> None:
+        """Répartit la watchlist avant le démarrage (les abonnements partent à la connexion)."""
+        for a in addresses:
+            if self._shard_of(a) is None:
+                min(self.shards, key=lambda c: len(c.addresses)).addresses.add(a)
+
+    async def add(self, address: str) -> None:
+        if self._shard_of(address) is not None:
+            return
+        libre = min(self.shards, key=lambda c: len(c.addresses))
+        if len(libre.addresses) >= PER_CONNECTION:
+            log.warning("Toutes les connexions Helius sont pleines : %s non suivi", address[:6])
+            return
+        await libre.add(address)
+
+    async def remove(self, address: str) -> None:
+        c = self._shard_of(address)
+        if c is not None:
+            await c.remove(address)
+
+    async def run(self) -> None:
+        await asyncio.gather(*(c.run() for c in self.shards))

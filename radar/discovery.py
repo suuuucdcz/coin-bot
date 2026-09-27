@@ -33,8 +33,8 @@ LOOKBACK_S = 7 * 86400
 MIN_SUCCESS_AGE_S = 24 * 3600
 MIN_HELD_RATIO = 0.25       # la MC actuelle vaut encore au moins 25 % de l'ATH
 PAGES = 4                   # 4 × 50 tokens par tri
-MAX_NEW_PER_RUN = 8         # rythme raisonnable pour le plan gratuit Helius
-MAX_EVALUATED_PER_RUN = 25
+MAX_NEW_PER_RUN = 20        # jusqu'à 20 devs à succès ajoutés par passage (toutes les 3 h)
+MAX_EVALUATED_PER_RUN = 40
 MIN_LIQUIDITY_USD = 25_000  # un succès = un vrai marché encore liquide
 # Anti-manipulation (vu en vrai : faux « fonds souverains » du cluster Reserve affichés à 4 000 M$ de MC avec
 # 30 k$ de liquidité). Un vrai memecoin a une liquidité d'au moins ~2 % de sa MC et des centaines de trades.

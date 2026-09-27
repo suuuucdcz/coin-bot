@@ -148,12 +148,12 @@ def load() -> Config:
         # « reserve-suspect » = devs au schéma des faux fonds souverains repérés par la découverte : toujours inclus
         rug_groups={g.strip() for g in (_env("RUG_GROUPS") or "reserve-cluster").split(",") if g.strip()}
         | {"reserve-suspect", "faux-coins", "reseau-rugs"},
-        watch_max=_int("WATCH_MAX", 300),
+        watch_max=_int("WATCH_MAX", 2000),
         watch_stale_days=_int("WATCH_STALE_DAYS", 10),
         x_quiet_hours=_hours("X_QUIET_HOURS", "3-8"),
         discovery_enabled=_bool("DISCOVERY_ENABLED", True),
         discovery_min_ath=_float("DISCOVERY_MIN_ATH", 500_000),
-        discovery_every_h=max(1, _int("DISCOVERY_EVERY_H", 6)),
+        discovery_every_h=max(1, _int("DISCOVERY_EVERY_H", 3)),
         typesafe_api_key=_env("TYPESAFE_API_KEY"),
         telegram_admins=[int(x) for x in re.findall(r"-?\d+", _env("TELEGRAM_ADMINS"))],
         # « À ne pas rater » : par défaut la conversation privée avec le 1er admin (ton compte Telegram)

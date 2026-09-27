@@ -60,7 +60,9 @@ Règles ajoutées à l'usage :
 
 - **Priorité RPC** : tout travail de fond (traçage, agenda, chasse au dev, découverte) passe par `Pipeline._spawn` ou `in_background` : ses appels Helius cèdent la place aux alertes temps réel.
 - **Alerte rapide** : création et ajout de liquidité partent tout de suite (CA et liens), puis le même message est complété (`Alert.replace`).
-- La watchlist est plafonnée (`WATCH_MAX`) et purgée chaque jour des wallets auto-ajoutés inactifs (`WATCH_STALE_DAYS`).
+- La watchlist est plafonnée (`WATCH_MAX`, 2 000 par défaut : plan gratuit Helius = 5 connexions × 1 000 abonnements,
+  `LogsWatcherPool`, 900 par connexion). Chaque jour, les satellites inactifs depuis `WATCH_STALE_DAYS` sont retirés ;
+  les devs, banks et wallets financés restent 6 fois plus longtemps (un bank dort jusqu'au prochain lancement).
 - Tout ce qui concerne la santé du radar part dans le compartiment Telegram `system`.
 - **Liens X (`analysis/xlinks.py`)** : un lien ne prouve que s'il existe dans les deux sens. Métadonnées → profil
   officiel = preuve moyenne (copiable) ; métadonnées → tweet = faible ; certification bleue = rien (payante).

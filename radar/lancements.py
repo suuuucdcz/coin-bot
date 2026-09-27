@@ -2,7 +2,8 @@
 
 Les bons devs relancent depuis un wallet neuf, pour ne pas être suivis. Le radar ne voit ces wallets à l'avance que si
 leur bank est surveillé. Ici, il part dans l'autre sens :
-  1. chaque nouveau token pump.fun (flux PumpPortal, gratuit) est mis de côté ;
+  0. dès la création : si le créateur est déjà connu de la base (même hors watchlist), alerte immédiate ;
+  1. sinon, chaque nouveau token pump.fun (flux PumpPortal, gratuit) est mis de côté ;
   2. entre 3 et 10 min après sa création, DexScreener (gratuit, par lots de 30) dit s'il décolle vraiment ;
   3. pour ceux qui décollent seulement (quelques %), l'argent du créateur est remonté (traceur anti-leurre ;
      les petits relais sont suivis sur 3 niveaux ; ~3 à 8 crédits Helius, plafonné par heure) ;
@@ -52,8 +53,18 @@ class LaunchWatch:
         if not creator or not mint or creator in self.p.watched:
             return   # un créateur déjà suivi est traité en direct par le pipeline
         self.stats["vus"] += 1
-        self.pending[mint] = {"mint": mint, "creator": creator, "ts": time.time(),
-                              "symbol": msg.get("symbol"), "name": msg.get("name")}
+        t = {"mint": mint, "creator": creator, "ts": time.time(), "symbol": msg.get("symbol"), "name": msg.get("name")}
+        connu = self._connu(creator)
+        if connu is not None:
+            # Créateur déjà connu de la base (sorti de la watchlist, ou jamais suivi mais relié par un lien) :
+            # alerte dès la création, sans attendre de voir s'il décolle. Recherche en base : aucun crédit.
+            genre, w = connu
+            self.stats["trouves"] += 1
+            self.p._spawn(self.alerter({**t, "mc": None, "txns": None, "genre": genre, "wallet": w["address"],
+                                        "label": w["label"], "grp": w["grp"], "role": w["role"],
+                                        "depth": w["depth"], "chaine": []}))
+            return
+        self.pending[mint] = t
         while len(self.pending) > PENDING_MAX:
             self.pending.popitem(last=False)
 
@@ -158,7 +169,8 @@ class LaunchWatch:
         lignes = [f"🔗 {via}" if r["chaine"] else "🔗 le créateur est lui-même un wallet déjà connu",
                   f"👤 Relié à <b>{esc(r['label'] or A.short(r['wallet']))}</b> · groupe {esc(r['grp'] or '?')}"
                   + (f"\n   <i>{esc(r['role'])}</i>" if r["role"] else ""),
-                  f"📈 3 à 10 min après la création : {A.usd(r['mc'])} · {r['txns']} échanges"]
+                  (f"📈 3 à 10 min après la création : {A.usd(r['mc'])} · {r['txns']} échanges" if r.get("mc")
+                   else "⚡ repéré dès la création du token")]
         flags = p.rug_flags(r["wallet"], info.creator)
         titre = "⛔ <b>UN RÉSEAU À RUGS RELANCE" if rug else "🔴 <b>NOUVEAU WALLET D'UN DEV CONNU"
         texte = A.card(f"{titre}</b>", info, flags, lignes, A.token_block(info, []) + p._announcement_line(info))

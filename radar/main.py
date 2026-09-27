@@ -21,11 +21,12 @@ from .agenda import PARIS, Agenda
 from .bot import MENU, Bot
 from .db import DB
 from .pipeline import Pipeline
+from .confiance import watch_priority
 from .results import Results
 from .lancements import LaunchWatch
 from .smart import SmartMoney
 from .sources import pumpportal
-from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background, notable_logs
+from .sources.helius import LogsWatcherPool, RpcError, SolanaRPC, in_background, notable_logs
 from .sources.x_watch import XWatcher, has_session
 from .telegram import Telegram, esc
 
@@ -48,6 +49,7 @@ STORM_MAX = 600
 STORM_DEPTH0_PAUSE_S = 6 * 3600     # un wallet bavard le reste 24 h (pas 40 tx gaspillées à chaque heure)
 HELIUS_FREE_CREDITS = 1_000_000
 BACKFILL_MAX_AGE_S = 30 * 60
+DORMANT_KEEP_FACTOR = 6      # devs / banks inactifs gardés 6 fois plus longtemps que les satellites
 SHORT_GAP_S = 10 * 60        # coupure courte : on ne rattrape pas les wallets qui dorment depuis 3 jours
 DORMANT_S = 3 * 86400 # après une coupure, on rattrape les tx de moins de 30 min
 DOWN_ALERT_S = 180           # coupure websocket / PumpPortal signalée sur Telegram après 3 min
@@ -202,11 +204,11 @@ async def amain() -> int:
             if not pipeline.seen_signature(sig):
                 queue.put_nowait(sig)
 
-        async def backfill() -> None:
-            """Après (re)connexion : rattrape les tx récentes manquées pendant la coupure."""
+        async def backfill(conn) -> None:
+            """Après (re)connexion d'UNE connexion : rattrape les tx récentes manquées par ses wallets."""
             n = sautes = 0
-            courte = watcher.last_gap is not None and watcher.last_gap < SHORT_GAP_S
-            for addr in list(watcher.addresses):
+            courte = conn.last_gap is not None and conn.last_gap < SHORT_GAP_S
+            for addr in list(conn.addresses):
                 if courte and time.time() - db.last_activity(addr) > DORMANT_S:
                     # Vu en vrai : ~10 micro-coupures internet par soirée x 160 wallets = 1 600 crédits Helius
                     # pour rien. Un wallet endormi depuis 3 jours n'a presque aucune chance d'agir pendant la coupure.
@@ -228,17 +230,17 @@ async def amain() -> int:
                     log.warning("Rattrapage impossible pour %s : %s", addr[:6], e)
             if n or sautes:
                 log.info("Rattrapage : %d transaction(s) manquée(s) remises en file%s", n,
-                         f" ({sautes} wallets endormis non interrogés, coupure de {int(watcher.last_gap)} s)"
+                         f" ({sautes} wallets endormis non interrogés, coupure de {int(conn.last_gap)} s)"
                          if sautes else "")
 
         # Wallets déjà repérés bavards dans les dernières 24 h (sinon 40 tx gaspillées après chaque redémarrage)
         for cle, t in db.settings_like("noisy:"):
             if time.time() - float(t) < NOISY_KEEP_S:
                 bavards[cle.split(":", 1)[1]] = float(t) + NOISY_KEEP_S
-        watcher = LogsWatcher(cfg.ws_url, on_signature, backfill)
+        watcher = LogsWatcherPool(cfg.ws_url, on_signature, backfill, capacity=cfg.watch_max)
         pipeline.watcher = watcher
         await pipeline.purge_services()
-        watcher.addresses |= pipeline.watched
+        watcher.add_initial(pipeline.watched)
 
         async def worker() -> None:
             while True:
@@ -341,7 +343,12 @@ async def amain() -> int:
                     continue
                 dernier_bilan = jour
                 db.put("daily_report", jour)
-                inactifs = db.stale_wallets(cfg.watch_stale_days)
+                # Satellites, acheteurs, détenteurs inactifs : retirés. Devs, banks et wallets financés : gardés bien
+                # plus longtemps (un bank dort jusqu'au jour où il finance le prochain lancement ; il ne coûte rien).
+                inactifs = [a for a in db.stale_wallets(cfg.watch_stale_days)
+                            if watch_priority((db.wallet(a) or {"role": ""})["role"], 1) >= 2]
+                inactifs += db.stale_wallets(cfg.watch_stale_days * DORMANT_KEEP_FACTOR)
+                inactifs = list(dict.fromkeys(inactifs))
                 if inactifs:
                     await pipeline.unwatch(inactifs)
                     log.info("Purge : %d wallet(s) inactif(s) mis en veille", len(inactifs))

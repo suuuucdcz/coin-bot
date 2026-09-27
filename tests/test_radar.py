@@ -150,3 +150,15 @@ def test_date_ecrite_prime_sur_demain():
     assert datetime.fromtimestamp(i.launch_ts, timezone.utc).strftime("%d/%m %H:%M") == "26/09 10:00"
     i = parse_tweet("$BZL launches tomorrow 15:00 UTC, price 1.5x", lu_le_26)   # « 1.5 » n'est pas une date
     assert datetime.fromtimestamp(i.launch_ts, timezone.utc).strftime("%d/%m %H:%M") == "27/09 15:00"
+
+
+def test_pool_websocket_repartit_les_wallets():
+    # Plan gratuit Helius : 5 connexions x 1 000 abonnements ; le radar en utilise plusieurs au lieu d'une seule
+    pool = helius.LogsWatcherPool("wss://x", None, None, capacity=2000)
+    assert len(pool.shards) == 3
+    pool.add_initial([f"W{i}" for i in range(2000)])
+    tailles = sorted(len(c.addresses) for c in pool.shards)
+    assert sum(tailles) == 2000 and tailles[-1] - tailles[0] <= 1 and len(pool.addresses) == 2000
+    asyncio.run(pool.remove("W5"))
+    assert "W5" not in pool.addresses and pool.down_since is not None   # pas encore connecté
+    assert len(helius.LogsWatcherPool("wss://x", None, None, capacity=99_000).shards) == helius.MAX_CONNECTIONS
