@@ -153,6 +153,10 @@ class Report:
             return ("⛔ schéma des faux fonds souverains",
                     f"réseau à rugs : dev financé {massif:g} SOL via une chaîne de relais au même montant "
                     "(schéma du cluster Reserve)")
+        if any(h.get("leurre") for h in self.funding_chain):
+            return ("🟠 leurre anti-traçage",
+                    "financement brouillé : petit envoi leurre juste avant le vrai financement (pour tromper les "
+                    "traceurs)")
         if relais:
             return ("🟠 financement brouillé",
                     f"financement brouillé : chaîne de relais au même montant ({relais[0]:g} SOL → {relais[1]:g} SOL)")
@@ -252,7 +256,7 @@ async def quick(pipeline, creator: str) -> Report:
         src = funding["source"]
         vus.add(src)
         hot, info = await tracer.hot_check(src, funding["signature"])
-        rep.funding_chain.append({"src": src, "sol": funding["amount"], "hot": hot})
+        rep.funding_chain.append({"src": src, "sol": funding["amount"], "hot": hot, "leurre": bool(funding.get("leurre"))})
         rep.edges.append({"src": src, "dst": cur, "kind": "financement", "sol": funding["amount"], "ts": funding["ts"]})
         if hot:
             rep.wallets[src] = {"label": pipeline.label(src) or f"exchange ({info})", "role": "exchange"}

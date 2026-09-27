@@ -31,6 +31,12 @@ from ..sources.pumpfun import coins_by_creator
 log = logging.getLogger("tracer")
 
 DUST_SOL = 0.002             # en dessous : bruit / address poisoning
+# Leurre anti-traceur (vu en vrai sur $WAIF, réseau Reserve) : 0,01 SOL via deux relais UNE seconde avant le vrai
+# financement, pour que « la première transaction » mène sur une fausse piste. Un premier funding aussi petit est
+# comparé aux suivants de la même heure : le plus gros (au moins 5 fois plus) est le vrai.
+DECOY_MAX_SOL = 0.05
+DECOY_WINDOW_S = 3600
+DECOY_RATIO = 5
 MIN_SIBLING_SOL = 0.005      # au-dessus du loyer d'un compte de token (~0,00204 SOL)
 RELAY_MAX_TX = 5             # un wallet avec si peu de tx = relais probable
 SIBLING_WINDOW_S = 120       # ± 2 min autour du funding
@@ -68,6 +74,7 @@ class Hop:
     source_hot: bool = False
     source_hot_info: str = ""
     siblings: list[Sibling] = field(default_factory=list)
+    decoy: dict | None = None    # leurre écarté : {source, amount} (petit envoi juste avant le vrai financement)
 
 
 @dataclass
@@ -101,7 +108,10 @@ class Tracer:
         if truncated:
             return None, None, "plus de 10 000 tx : adresse très active (service / exchange ?), remontée arrêtée"
         ok = [s for s in reversed(sigs) if s.get("err") is None]  # de la plus ancienne à la plus récente
+        premier, debut = None, 0
         for s in ok[:8]:
+            if premier and (s.get("blockTime") or 0) - debut > DECOY_WINDOW_S:
+                break
             tx = await self.rpc.transaction(s["signature"])
             if not tx:
                 continue
@@ -113,8 +123,17 @@ class Tracer:
             if not perdants:
                 continue
             _, source = min(perdants)
-            return ({"source": source, "amount": round(recu, 6), "signature": s["signature"],
-                     "ts": tx.get("blockTime") or s.get("blockTime") or 0}, len(sigs), "")
+            funding = {"source": source, "amount": round(recu, 6), "signature": s["signature"],
+                       "ts": tx.get("blockTime") or s.get("blockTime") or 0}
+            if premier is None:
+                if recu >= DECOY_MAX_SOL:
+                    return funding, len(sigs), ""
+                premier, debut = funding, s.get("blockTime") or funding["ts"]   # leurre possible : on regarde la suite
+            elif recu >= DECOY_RATIO * premier["amount"] and recu >= DECOY_MAX_SOL:
+                funding["leurre"] = {"source": premier["source"], "amount": premier["amount"]}
+                return funding, len(sigs), ""
+        if premier:
+            return premier, len(sigs), ""
         return None, len(sigs), "aucune entrée de SOL identifiable dans les premières transactions"
 
     async def hot_check(self, source: str, before_sig: str) -> tuple[bool, str]:
@@ -183,7 +202,8 @@ class Tracer:
             src = funding["source"]
             is_relay = nb_tx is not None and nb_tx <= RELAY_MAX_TX
             hot, info = await self.hot_check(src, funding["signature"])
-            hop = Hop(current, nb_tx, is_relay, src, funding["amount"], funding["signature"], funding["ts"], hot, info)
+            hop = Hop(current, nb_tx, is_relay, src, funding["amount"], funding["signature"], funding["ts"], hot, info,
+                      decoy=funding.get("leurre"))
             if with_siblings and not hot:
                 hop.siblings = await self.siblings(src, funding, current)
                 same = sum(s.same_amount for s in hop.siblings)
@@ -241,6 +261,9 @@ def print_result(res: TraceResult, db: DB) -> None:
         nb = f"{h.tx_count} tx" if h.tx_count is not None else "10 000+ tx"
         print(f"{i}. {short(h.address)} ({nb}) a reçu {h.amount:g} SOL de {h.source} {tag(h.source)}")
         print(f"   {kind} · {fmt_ts(h.ts)} · tx {h.signature[:16]}…")
+        if h.decoy:
+            print(f"   🪤 leurre écarté : {h.decoy['amount']:g} SOL de {short(h.decoy['source'])} juste avant "
+                  "(petit envoi pour tromper les traceurs)")
         if h.source_hot:
             print(f"   ⛔ {short(h.source)} = exchange / service : {h.source_hot_info}")
         same = [s for s in h.siblings if s.same_amount]
