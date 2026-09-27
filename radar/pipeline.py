@@ -18,7 +18,7 @@ from . import alerts as A
 from .alerte import Alert, KIND_TOPIC, RUG_MARK
 from .analysis.classify import Event, analyze, programs
 from .analysis.enrich import TokenInfo, purge_cache, token_info
-from .confiance import is_dev_role, is_service, wallet_trust, watch_priority
+from .confiance import is_dev_role, is_service, is_smart_role, wallet_trust, watch_priority
 from .config import Config
 from .db import DB
 from .evenements import EvenementsMixin
@@ -28,6 +28,7 @@ from .reglages import (
 from .sources import dexscreener
 from .sources.helius import AMM_PROGRAMS, LogsWatcher, SolanaRPC, account_keys, in_background, sol_deltas
 from .telegram import Telegram, esc
+from .smart import SMART_GROUP
 from .top import TopMixin
 
 # Réexportés : les autres modules et les tests les importent depuis radar.pipeline
@@ -142,6 +143,10 @@ class Pipeline(TopMixin, EvenementsMixin):
     def bad_groups(self) -> set[str]:
         return set(self.cfg.rug_groups)
 
+    def is_smart(self, address: str) -> bool:
+        w = self.db.wallet(address)
+        return bool(w and is_smart_role(w["role"]))
+
     def is_sniper(self, address: str) -> bool:
         return bool(self.db.get(f"sniper:{address}"))
 
@@ -185,7 +190,8 @@ class Pipeline(TopMixin, EvenementsMixin):
         if self.is_sniper(ev.wallet):
             return True
         w = self.db.wallet(ev.wallet)
-        if not w or w["depth"] == 0:
+        if not w or w["depth"] == 0 or is_smart_role(w["role"]):
+            # watchlist de départ jamais reclassée ; un smart money achète beaucoup de tokens : c'est son rôle
             return False  # la watchlist de départ n'est jamais reclassée automatiquement
         now = int(time.time())
         cle = f"buys:{ev.wallet}"
@@ -216,6 +222,8 @@ class Pipeline(TopMixin, EvenementsMixin):
 
     def _farm_check(self, grp: str, mint: str) -> bool:
         """Mémorise les tokens où le groupe « entre ». Trop de tokens différents = ferme de bots."""
+        if grp == SMART_GROUP:
+            return False   # le smart money entre dans beaucoup de tokens : ce n'est pas une ferme
         now = int(time.time())
         cle = f"grp_tokens:{grp}"
         vus = {m: t for m, t in json.loads(self.db.get(cle) or "{}").items() if now - t < FARM_WINDOW_S}

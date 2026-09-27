@@ -51,7 +51,8 @@ SECTION_INFO = {
         "🔥 <b>ALERTES DEV ON-CHAIN</b>\n"
         "Ce que font <b>en direct</b> les wallets de devs surveillés :\n"
         "🔴 crée un token · 🟠 achète · 🟣 reçoit de la supply sans payer (préparation) · "
-        "🟢 ajoute la liquidité (trading ouvert) · ⚠️ vend · 🎯 le dev ou son cluster entre dans un token jeune.\n\n"
+        "🟢 ajoute la liquidité (trading ouvert) · ⚠️ vend · 🎯 le dev ou son cluster entre dans un token jeune · "
+        "🧠 plusieurs wallets smart money (gros détenteurs de vrais succès) entrent ensemble.\n\n"
         "<b>Lire une alerte</b> : 1. quoi + token · 2. verdict (⛔ à éviter · 🟠 prudence · 🟡 à vérifier · "
         "🟢 rien de suspect) · 3. qui et combien · 4. le token (CA, âge, MC, dev, 🕸 réseau, X) · 5. les 🚩.\n"
         "Les alertes vérifiées et propres sont <b>aussi</b> copiées dans ‼️ À ne pas rater."),
@@ -86,6 +87,8 @@ SECTION_INFO = {
                "(fermes de bots, snipers), bilan chaque matin à 9 h.</i>"),
 }
 HEADER_VERSION = "1"
+# Version par section (un en-tête n'est republié que si SON texte a changé)
+HEADER_VERSIONS = {"onchain": "2"}
 
 # Alertes secondaires : envoyées sans son (les importantes gardent la notification)
 QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes", "resultats"}
@@ -293,18 +296,19 @@ class Telegram:
         """Épingle en tête de chaque section ce qu'elle contient (une fois par version du texte)."""
         if not self.forum:
             return
-        for key in ("onchain", "clusters", "devs", "scams"):
+        for key in ("onchain", "clusters", "devs", "scams", "resultats"):
             if key not in self.threads:
                 continue
             cle = f"header:{self.place(key)}"
-            if self.db and self.db.get(cle) == HEADER_VERSION:
+            version = HEADER_VERSIONS.get(key, HEADER_VERSION)
+            if self.db and self.db.get(cle) == version:
                 continue
             try:
                 res = await self.send_now(SECTION_INFO[key], topic=key, quiet=True)
                 await self._call("pinChatMessage", {"chat_id": self.chat_id, "message_id": res["result"]["message_id"],
                                                     "disable_notification": True})
                 if self.db:
-                    self.db.put(cle, HEADER_VERSION)
+                    self.db.put(cle, version)
             except Exception as e:
                 log.debug("Explication de la section %s non épinglée : %s", key, e)
 

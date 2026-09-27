@@ -11,7 +11,8 @@ from .analysis.enrich import TokenInfo
 KIND_TOPIC = {"create": "onchain", "buy": "onchain", "supply_in": "onchain", "lp_add": "onchain", "supply_out": "onchain",
               "sell": "onchain", "transfer": "clusters", "funding": "clusters", "cex": "clusters",
               "trace": "devs", "mute": "clusters", "cluster": "onchain", "discovery": "devs",
-              "system": "system", "resultats": "resultats"}
+              "system": "system", "resultats": "resultats",
+              "smart": "onchain"}
 
 
 @dataclass

@@ -49,12 +49,17 @@ def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | fr
     return "faible"
 
 
+def is_smart_role(role: str | None) -> bool:
+    """Wallet « smart money » (radar/smart.py) : il achète beaucoup de tokens, c'est normal."""
+    return (role or "").strip().lower().startswith("smart money")
+
+
 def watch_priority(role: str | None, depth: int) -> int:
     """0 = watchlist de départ, 1 = dev / wallet financé / bank / contrat, 2 = satellite, acheteur, détenteur."""
     r = (role or "").lower()
     if depth == 0:
         return 0
-    if is_dev_role(role) or is_upstream_role(role) or r.startswith("financé par") or "contrat" in r:
+    if is_dev_role(role) or is_upstream_role(role) or r.startswith(("financé par", "smart money")) or "contrat" in r:
         return 1
     return 2
 

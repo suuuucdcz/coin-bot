@@ -13,6 +13,7 @@ from .confiance import TRUSTED, is_dev_role, is_service, is_upstream_role
 from .reglages import (
     BURST_MAX_ALERTS, BURST_WINDOW_S, CLUSTER_WINDOW_S, DEV_BIG_BUY_PCT, FUNDED_MAX_24H, INDEPENDENT_GROUPS,
     NEW_WALLET_MAX_TX, RESERVE_MIN_PCT, SUPPLY_IN_MIN_PCT, SUPPLY_OUT_MIN_PCT, YOUNG_TOKEN_S)
+from .smart import SMART_GROUP, SMART_TOP_MIN
 from .telegram import esc
 
 log = logging.getLogger("pipeline")
@@ -73,21 +74,30 @@ class EvenementsMixin:
             return  # achat d'un vieux token : pas un lancement
         if info.crowded:
             return  # déjà lancé et callé (beaucoup de monde dessus) : trop tard, inutile
-        qui = "LE DEV ENTRE DANS UN TOKEN" if is_dev and len(entries) == 1 else f"LE CLUSTER ENTRE ({len(entries)} wallets)"
+        smart = grp == SMART_GROUP
+        qui = (f"SMART MONEY ENTRE ({len(entries)} wallets)" if smart
+               else "LE DEV ENTRE DANS UN TOKEN" if is_dev and len(entries) == 1
+               else f"LE CLUSTER ENTRE ({len(entries)} wallets)")
         membres = [f"🎯 Groupe <b>{esc(grp)}</b> · {len(entries)} achat{'s' if len(entries) > 1 else ''} "
                    f"en {CLUSTER_WINDOW_S // 60} min"]
         for a in entries:
             r = self.db.wallet(a)
             membres.append(f"• <b>{esc(self.label(a) or A.short(a))}</b>"
                            + (f" <i>{esc(r['role'])}</i>" if r and r["role"] else "") + f"\n  <code>{a}</code>")
-        text = A.card(f"🎯 <b>{qui}</b>", info, self.rug_flags(ev.wallet, info.creator), membres,
+        text = A.card(f"{'🧠' if smart else '🎯'} <b>{qui}</b>", info, self.rug_flags(ev.wallet, info.creator), membres,
                       A.token_block(info, []) + self._announcement_line(info))
         flags = self.rug_flags(ev.wallet, info.creator)
         # « À ne pas rater » seulement si le dev lui-même (ou un wallet prouvé) entre : des satellites
         # ou des acheteurs qui achètent ensemble, c'est exactement ce que fait une ferme de bots.
         confiance = any(self.trust(a) in ("référence", "prouvé") for a in entries)
-        alert = Alert(akey, "cluster", text, A.token_buttons(info, ev.wallet, mute=ev.wallet),
-                      top_title=qui if confiance else "", top_why=(self._why(ev.wallet, "achète ce token tout jeune") if len(entries) == 1
+        if smart:
+            # Smart money : un seul wallet peut appâter les copieurs ; il en faut SMART_TOP_MIN ensemble
+            confiance = len(entries) >= SMART_TOP_MIN
+        alert = Alert(akey, "smart" if smart else "cluster", text, A.token_buttons(info, ev.wallet, mute=ev.wallet),
+                      top_title=qui if confiance else "",
+                      top_why=(f"{len(entries)} wallets smart money (gros détenteurs de vrais succès) achètent ce "
+                               f"token tout jeune en moins de {CLUSTER_WINDOW_S // 60} min" if smart
+                               else self._why(ev.wallet, "achète ce token tout jeune") if len(entries) == 1
                                               else f"{len(entries)} wallets du groupe <b>{esc(grp)}</b> achètent "
                                                    f"ce token tout jeune en moins de {CLUSTER_WINDOW_S // 60} min"),
                       info=info, flags=flags, wallet=ev.wallet, event_ts=ev.ts)

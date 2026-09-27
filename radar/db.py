@@ -110,6 +110,15 @@ CREATE TABLE IF NOT EXISTS results (   -- suivi des alertes sur 24 h (radar/resu
     check5     TEXT                   -- « ‼️ » : verdict du contrôle à +5 min (ok / suspect)
 );
 CREATE INDEX IF NOT EXISTS results_open ON results(done, sent_at);
+CREATE TABLE IF NOT EXISTS smart_hits (   -- gros détenteurs des vrais succès (radar/smart.py)
+    wallet  TEXT NOT NULL,
+    mint    TEXT NOT NULL,
+    creator TEXT,
+    symbol  TEXT,
+    pct     REAL,
+    ts      INTEGER,
+    PRIMARY KEY (wallet, mint)
+);
 """
 
 
@@ -330,6 +339,19 @@ class DB:
             (mc0, haut or None, mc, now, age, mc, age, mc, age, key))
         self.conn.commit()
 
+    # --- smart money -------------------------------------------------------------------
+    def add_smart_hit(self, wallet: str, mint: str, creator: str | None, symbol: str | None, pct: float) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO smart_hits(wallet,mint,creator,symbol,pct,ts) VALUES(?,?,?,?,?,?)",
+                          (wallet, mint, creator, symbol, pct, int(time.time())))
+        self.conn.commit()
+
+    def smart_candidates(self, since: int, min_wins: int, min_creators: int) -> list[sqlite3.Row]:
+        """Wallets gros détenteurs d'au moins `min_wins` succès de `min_creators` devs différents, les plus réguliers d'abord."""
+        return self.conn.execute(
+            "SELECT wallet, COUNT(DISTINCT mint) n, COUNT(DISTINCT creator) c, "
+            "GROUP_CONCAT(DISTINCT '$' || symbol) symbols FROM smart_hits WHERE ts>=? GROUP BY wallet "
+            "HAVING n>=? AND c>=? ORDER BY n DESC, c DESC", (since, min_wins, min_creators)).fetchall()
+
     def set_result_check(self, key: str, verdict: str) -> None:
         self.conn.execute("UPDATE results SET check5=? WHERE key=?", (verdict, key))
         self.conn.commit()
@@ -344,8 +366,8 @@ class DB:
     RESET_TABLES = ("alerts", "results", "announcements", "tokens", "tweets_seen", "networks")
     RESET_KEYS = ("ann_seen:", "buys:", "creates:", "grp_tokens:", "daily_report", "discovery_last")
     # Avec tout=True, en plus : ce que le radar a APPRIS (wallets ajoutés, liens, étiquettes, classements)
-    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts")
-    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:")
+    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts", "smart_hits")
+    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:", "smart_vu:")
 
     def remise_a_zero(self, tout: bool = False) -> dict[str, int]:
         """Efface l'historique et les compteurs (voir RESET_*). tout=True : repart aussi de la watchlist de départ."""

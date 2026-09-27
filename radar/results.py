@@ -24,7 +24,8 @@ log = logging.getLogger("resultats")
 
 # Alertes suivies (clé = type d'alerte) et leur nom dans le bilan
 TRACKED = {"top": "‼️ À ne pas rater", "create": "🔴 Créations", "buy": "🟠 Achats d'un dev",
-           "cluster": "🎯 Cluster / dev qui entre", "lp_add": "🟢 Trading ouvert", "supply_in": "🟣 Supply reçue",
+           "cluster": "🎯 Cluster / dev qui entre", "smart": "🧠 Smart money",
+           "lp_add": "🟢 Trading ouvert", "supply_in": "🟣 Supply reçue",
            "annonce": "📆 Coins annoncés lancés"}
 CHECK_EVERY_S = 600          # une mesure toutes les 10 min pendant 24 h
 FOLLOW_S = 24 * 3600

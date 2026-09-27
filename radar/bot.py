@@ -25,6 +25,7 @@ from .analysis.jev import ROLE_LABELS
 from .analysis.tracer import Tracer, save_result
 from .analysis.xparse import is_solana_address
 from .config import AIDE_X, _handles
+from .smart import SMART_GROUP
 from .sources import pumpfun, pumpportal
 from .sources.helius import in_background
 from .sources.x_watch import quiet_until
@@ -259,7 +260,9 @@ class Bot:
                            else "⚪ indisponible : tweets lus par les règles seules (strictes)"),
             f"🤖 IA Jev : {'🟢 active' if self.agenda.jev.enabled else '⚪ non configurée'}",
             A.SEP,
-            f"👛 Wallets suivis : <b>{len(self.watcher.addresses)}</b> / {self.cfg.watch_max}",
+            f"👛 Wallets suivis : <b>{len(self.watcher.addresses)}</b> / {self.cfg.watch_max}"
+            + (f" · 🧠 smart money : {n}" if (n := sum(1 for w in self.db.active_wallets() if w["grp"] == SMART_GROUP))
+               else " · 🧠 smart money : en cours de repérage"),
             f"📜 Contrats en attente de lancement : {len(self.p.mints)}",
             f"📨 Transactions analysées : {self.stats.get('tx', 0)}",
             *[ligne for ligne in (self.tg.latency_line() if hasattr(self.tg, "latency_line") else None,

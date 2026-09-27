@@ -22,6 +22,7 @@ from .bot import MENU, Bot
 from .db import DB
 from .pipeline import Pipeline
 from .results import Results
+from .smart import SmartMoney
 from .sources import pumpportal
 from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background, notable_logs
 from .sources.x_watch import XWatcher, has_session
@@ -138,7 +139,8 @@ async def amain() -> int:
                 db.put(f"noisy:{addr}", int(now))
             if len(dh) > NOISY_PER_HOUR:
                 bavards[addr] = now + NOISY_KEEP_S
-            if bavards.get(addr, 0) > now and not notable_logs(logs, strict=len(dh) > SERVICE_PER_HOUR):
+            smart = len(dh) <= SERVICE_PER_HOUR and pipeline.is_smart(addr)   # ses achats SONT le signal
+            if bavards.get(addr, 0) > now and not smart and not notable_logs(logs, strict=len(dh) > SERVICE_PER_HOUR):
                 stats["filtrées"] = stats.get("filtrées", 0) + 1
                 try:
                     db.set_last_sig(addr, sig)
@@ -353,7 +355,7 @@ async def amain() -> int:
                  bot.run(), bot.dashboard(),
                  *[worker() for _ in range(WORKERS)], pumpportal.run(on_new_token),
                  in_background(agenda.refresh_loop()), in_background(agenda.poll_dexscreener()),
-                 pipeline.results.loop()]
+                 pipeline.results.loop(), in_background(SmartMoney(pipeline).loop())]
         if xwatcher:
             tasks.append(in_background(xwatcher.run()))
         if cfg.discovery_enabled:
