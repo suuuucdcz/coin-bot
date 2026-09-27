@@ -195,3 +195,41 @@ def test_fiche_agenda_html_valide(agenda):
     texte, _kb = a.card(db.announcement(ann_id))
     assert html_ok(texte) and "Compte officiel probable : @AshbornCoin" in texte and "payante" in texte
     assert html_ok(a.render())
+
+
+# --- avant l'heure annoncée : le dev teste, chauffe avec des faux, ou lance depuis un wallet neuf ----------------
+DEVPROB = "DEVPROBaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+NEUF = "NEUFwalletnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+
+
+def test_wallet_neuf_du_dev_cree_le_token_avant_l_heure(agenda):
+    a, db, ann_id = agenda
+    a._dev_cands[DEVPROB] = ann_id
+    asyncio.run(a.on_dev_funding(DEVPROB, NEUF, 3.0))
+    assert a._dev_cands[NEUF] == ann_id and "finance un wallet neuf" in a.tg.msgs[0]
+    assert json.loads(db.announcement(ann_id)["details"])["dev_candidates"][0]["parent"] == DEVPROB
+    asyncio.run(a._candidate(db.announcement(ann_id), MINT, NEUF, None, "pump.fun", by_dev=True))
+    confirme = [m for m in a.tg.msgs if "COIN ANNONCÉ CRÉÉ" in m][0]
+    assert db.announcement(ann_id)["ca"] == MINT and "AVANT l'heure annoncée" in confirme   # annoncé dans 6 h
+
+
+def test_createur_inconnu_finance_par_le_dev_est_relie(agenda):
+    a, db, ann_id = agenda
+    a._dev_cands[DEVPROB] = ann_id
+    db.add_wallet(NEUF, "NEW_NEUF", "$ASH", "financé par DEVPROB", 2, DEVPROB)   # funding vu par le radar
+    asyncio.run(a._candidate(db.announcement(ann_id), MINT, NEUF, None, "pump.fun"))
+    assert db.announcement(ann_id)["ca"] == MINT
+    assert any("financé par le dev probable" in m for m in a.tg.msgs)
+
+
+def test_token_de_test_du_dev_signale_sans_etre_relie(agenda, monkeypatch):
+    from radar import agenda as ag
+    from radar.analysis.enrich import TokenInfo
+    a, db, ann_id = agenda
+    a._dev_cands[DEVPROB] = ann_id
+
+    async def info(*_a, **_k):
+        return TokenInfo(MINT, symbol="TEST", creator=DEVPROB)
+    monkeypatch.setattr(ag, "token_info", info)
+    asyncio.run(a.on_watched_create(DEVPROB, MINT))
+    assert db.announcement(ann_id)["ca"] is None and "🧪" in a.tg.msgs[0] and "Test ou leurre" in a.tg.msgs[0]

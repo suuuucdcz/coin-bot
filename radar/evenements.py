@@ -421,6 +421,8 @@ class EvenementsMixin:
         depth = (src_row["depth"] if src_row else 0) + 1
         grp = src_row["grp"] if src_row else None
         added = await self.watch(dst, f"NEW_{dst[:4]}", grp, f"financé par {self.label(src) or src[:6]}", depth, src)
+        if self.on_funding and not self.dry_run:
+            self._spawn(self.on_funding(src, dst, ev.sol))   # le dev d'un coin annoncé prépare-t-il son wallet ?
 
         # Rafale (ex. 0,10 SOL vers 5 relais en 1 min) : on résume au lieu de spammer
         now = time.time()

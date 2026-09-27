@@ -56,6 +56,7 @@ class Pipeline(TopMixin, EvenementsMixin):
         self.on_launch = None          # rappel de l'agenda quand un pool apparaît
         self.on_ann_update = None      # rappel de l'agenda pour mettre à jour une fiche coin
         self.on_create = None          # rappel de l'agenda : un wallet suivi a créé un token
+        self.on_funding = None         # rappel de l'agenda : un wallet suivi a financé un wallet neuf
         self.on_cluster_entry = None   # rappel de l'agenda : un cluster entre dans un token
         self._entries: dict[tuple[str, str], dict[str, float]] = {}
         self._inflight: set[str] = set()

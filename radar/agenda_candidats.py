@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from . import alerts as A
 from .agenda_outils import (
     FRESH_CA_S, MATCH_WINDOW_S, PROBABLE_WINDOW_S, PROFILE_FRESH_S, VERIFY_DELAYS_S, norm_ticker)
 from .analysis import xlinks
@@ -109,8 +110,15 @@ class CandidatsMixin:
         official, _why = self._official(ann)
         annonceurs = {src.get("handle") or "" for src in json.loads(ann["sources"] or "[]")}
         dev_link = by_dev or (creator is not None and self._dev_cands.get(creator) == ann["id"])
-        # Le lien par le dev n'est une preuve forte que si ce wallet a été trouvé de façon fiable
-        dev_link = dev_link and self.p.trust(creator) in ("référence", "prouvé", "lié")
+        if not dev_link and creator:
+            # Créateur inconnu : financé par un dev probable de CE coin ? (le dev lance souvent depuis un wallet neuf)
+            parent = self._dev_parent.get(creator) or await self.financeur(creator)
+            if parent and self._dev_cands.get(parent) == ann["id"]:
+                self._dev_parent[creator] = parent
+                dev_link = True
+                detail = (detail + " · " if detail else "") + f"créé par un wallet financé par le dev probable ({parent[:4]}…)"
+        # Le lien par le dev n'est une preuve forte que si ce wallet (ou le dev qui l'a financé) est fiable
+        dev_link = dev_link and self.dev_fiable(creator)
         # Heure de création du token (pas l'heure où on le voit : DexScreener est relu toutes les 90 s)
         cree = created_ts or time.time()
         heures = [ann["launch_ts"]] if ann["launch_ts"] else []
@@ -119,6 +127,9 @@ class CandidatsMixin:
         ev = xlinks.link_evidence(official, meta_twitter, by_dev=dev_link, time_match=probable,
                                   other_handles=annonceurs)
         if ev.level == "fort":
+            if heures and min(heures) - cree > 60:
+                # Le dev a lancé AVANT l'heure annoncée : ceux qui attendent l'heure (ou le tweet) arrivent après
+                detail = f"⚡ créé {A.age(int(min(heures) - cree))} AVANT l'heure annoncée" + (" · " + detail if detail else "")
             await self._confirm(ann, mint, creator, where, detail, ev)
             return
         if verify or ev.level == "moyen" or probable:
@@ -177,7 +188,8 @@ class CandidatsMixin:
                 preuve = (ev.strong or ["lien vérifié"])[0]
                 self.p._emit_top(Alert(f"match:{mint}", "match", "", None,
                                        top_title=f"${ann['ticker']} ANNONCÉ SUR X EST LANCÉ",
-                                       top_why=f"Annoncé par <b>@{esc(official)}</b> · ✅ {esc(preuve)}",
+                                       top_why=f"Annoncé par <b>@{esc(official)}</b> · ✅ {esc(preuve)}"
+                                               + (f" · {esc(detail)}" if "AVANT" in (detail or "") else ""),
                                        info=info, flags=self.p.rug_flags(creator)))
             except Exception:
                 log.exception("Alerte « à ne pas rater » impossible pour %s", mint)

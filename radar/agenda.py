@@ -51,6 +51,8 @@ class Agenda(CandidatsMixin, FauxCoinsMixin, AffichageMixin):
         pipeline.on_launch = self.mark_launched
         pipeline.on_ann_update = self.update_card
         pipeline.on_create = self.on_watched_create
+        pipeline.on_funding = self.on_dev_funding
+        self._dev_parent: dict[str, str] = {}      # wallet financé par un dev probable -> ce dev
         pipeline.on_cluster_entry = self.on_cluster_entry
         # Devs probables (chasse au dev) : wallet -> annonce
         self._dev_cands: dict[str, int] = {}
@@ -75,6 +77,8 @@ class Agenda(CandidatsMixin, FauxCoinsMixin, AffichageMixin):
         for r in self.db.announcements_since(int(time.time()) - MATCH_WINDOW_S):
             for c in json.loads(r["details"] or "{}").get("dev_candidates", []):
                 self._dev_cands[c["address"]] = r["id"]
+                if c.get("parent"):
+                    self._dev_parent[c["address"]] = c["parent"]
 
     async def on_cluster_entry(self, grp: str, mint: str, wallets: list[str], info, alert) -> None:
         """Le dev/les satellites d'un coin annoncé achètent un token : on l'accroche à sa fiche."""
@@ -110,6 +114,48 @@ class Agenda(CandidatsMixin, FauxCoinsMixin, AffichageMixin):
             await self.update_card(ann["id"])
             self.p._spawn(self.resolve(ann["id"]))
 
+    async def on_dev_funding(self, src: str, dst: str, sol: float) -> None:
+        """Un dev probable d'un coin annoncé finance un wallet neuf : c'est souvent le wallet qui lancera le vrai
+        token (ou un test / un faux pour chauffer). Il rejoint la famille du dev : s'il crée le token, c'est une
+        preuve forte, même avant l'heure annoncée."""
+        ann_id = self._dev_cands.get(src)
+        ann = self.db.announcement(ann_id) if ann_id else None
+        if not ann or ann["ca"] or dst in self._dev_cands:
+            return
+        self._dev_cands[dst] = ann_id
+        self._dev_parent[dst] = src
+        details = json.loads(ann["details"] or "{}")
+        details.setdefault("dev_candidates", []).append(
+            {"address": dst, "reason": f"wallet neuf financé par le dev probable ({sol:g} SOL)", "parent": src})
+        self.db.update_announcement(ann_id, details=json.dumps(details))
+        quand = f" · lancement prévu {paris(ann['launch_ts'])} (Paris)" if ann["launch_ts"] else ""
+        self.tg.enqueue(f"💸 <b>${esc(ann['ticker'])} : le dev probable finance un wallet neuf</b> ({sol:g} SOL){quand}\n"
+                        f"<code>{dst}</code>\n<i>Souvent le wallet qui lancera le vrai token (ou un test). S'il crée "
+                        f"${esc(ann['ticker'])}, ce sera relié au dev (preuve forte), même avant l'heure.</i>",
+                        key=f"devfund:{dst}", kind="agenda", topic="agenda", reply_to=ann["msg_id"])
+
+    def dev_fiable(self, creator: str | None) -> bool:
+        """Wallet du dev jugé fiable : lui-même, ou le dev probable qui l'a financé."""
+        ok = ("référence", "prouvé", "lié")
+        return bool(creator) and (self.p.trust(creator) in ok or self.p.trust(self._dev_parent.get(creator)) in ok)
+
+    async def financeur(self, creator: str) -> str | None:
+        """Qui a financé ce créateur ? Base d'abord (aucun crédit), sinon traceur anti-leurre (~3 crédits)."""
+        w = self.db.wallet(creator)
+        if w is not None and w["parent"]:
+            return w["parent"]
+        r = self.db.conn.execute("SELECT src FROM links WHERE dst=? ORDER BY ts LIMIT 1", (creator,)).fetchone()
+        if r:
+            return r["src"]
+        if self.p.rpc is None:
+            return None
+        from .analysis.tracer import Tracer
+        try:
+            funding, _nb, _r = await Tracer(self.p.rpc, self.p.cfg.hot_wallet_tx_threshold, {}).first_funding(creator)
+        except Exception:
+            return None
+        return funding["source"] if funding else None
+
     async def on_watched_create(self, creator: str, mint: str) -> None:
         """Création vue par Helius (toutes plateformes) par un dev probable -> relier à l'annonce."""
         ann_id = self._dev_cands.get(creator)
@@ -117,7 +163,13 @@ class Agenda(CandidatsMixin, FauxCoinsMixin, AffichageMixin):
         if ann and not ann["ca"]:
             info = await token_info(self.p.rpc, self.p.http, mint, creator, with_dev_history=False)
             if not self._same_ticker(ann, info.symbol):
-                log.info("$%s : le dev probable a créé $%s (autre ticker), pas relié", ann["ticker"], info.symbol)
+                # Un test ou un faux pour chauffer avant l'heure : pas le coin, mais le dev s'active
+                log.info("$%s : le dev probable a créé $%s (autre ticker) : test ou leurre", ann["ticker"], info.symbol)
+                self.tg.enqueue(f"🧪 <b>${esc(ann['ticker'])} : le dev probable vient de créer ${esc(info.symbol or '?')}"
+                                f"</b> (autre ticker)\n<code>{mint}</code>\n<i>Test ou leurre avant le lancement : "
+                                "le dev s'active, le vrai token approche peut-être.</i>",
+                                self._token_buttons(mint, ann), key=f"test:{mint}", kind="agenda", topic="agenda",
+                                reply_to=ann["msg_id"])
                 return
             await self._candidate(ann, mint, creator, None, "on-chain", "créé par le dev probable", by_dev=True)
 
