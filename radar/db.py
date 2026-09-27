@@ -340,7 +340,7 @@ class DB:
     RESET_KEYS = ("ann_seen:", "buys:", "creates:", "grp_tokens:", "daily_report", "discovery_last")
     # Avec tout=True, en plus : ce que le radar a APPRIS (wallets ajoutés, liens, étiquettes, classements)
     LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts")
-    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:")
+    LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:")
 
     def remise_a_zero(self, tout: bool = False) -> dict[str, int]:
         """Efface l'historique et les compteurs (voir RESET_*). tout=True : repart aussi de la watchlist de départ."""

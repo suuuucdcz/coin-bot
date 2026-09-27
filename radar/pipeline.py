@@ -24,7 +24,8 @@ from .db import DB
 from .evenements import EvenementsMixin
 from .reglages import (
     BURST_WINDOW_S, CLUSTER_WINDOW_S, FACTORY_FLAG_24H, FACTORY_UNWATCH_24H, FARM_MIN_TOKENS, FARM_WINDOW_S,
-    SNIPER_MIN_TOKENS, TOP_KINDS, TOP_RETRY_S, TRADE_KINDS, TRADE_MAX_PER_HOUR, TRADE_MUTE_S)
+    LAUNCH_OLD_S, SNIPER_MIN_TOKENS, TOP_KINDS, TOP_RETRY_S, TRADE_KINDS, TRADE_MAX_PER_HOUR, TRADE_MUTE_S)
+from .sources import dexscreener
 from .sources.helius import AMM_PROGRAMS, LogsWatcher, SolanaRPC, account_keys, in_background, sol_deltas
 from .telegram import Telegram, esc
 
@@ -77,7 +78,7 @@ class Pipeline(EvenementsMixin):
             w = self.db.wallet(a)
             if not (w and (w["depth"] == 0 or (w["label"] or "").startswith("MINT_"))):
                 continue
-            if self.db.alert_already_sent(f"lp:{a}"):
+            if self.db.alert_already_sent(f"lp:{a}") or self.db.get(f"lance:{a}") or await self.already_trading(a):
                 # Déjà lancé (vu en vrai : $ASH redevenait « en attente » à chaque redémarrage et chaque
                 # échange sur le token arrivait ici)
                 self.watched.discard(a)
@@ -86,6 +87,19 @@ class Pipeline(EvenementsMixin):
                 self.mints.add(a)
         if self.mints:
             log.info("Contrats suivis en attente de lancement : %s", ", ".join(self.label(m) or m for m in self.mints))
+
+    async def already_trading(self, mint: str) -> bool:
+        """Le token s'échange-t-il déjà depuis plus de 30 min (DexScreener, gratuit) ? Alors ce n'est plus un
+        lancement : un ajout de liquidité ou un contrat « en attente » ne doit pas donner « TRADING OUVERT »."""
+        if self.db.get(f"lance:{mint}"):
+            return True
+        if self.http is None or self.dry_run:
+            return False
+        paire = await dexscreener.token_pairs(self.http, mint)
+        if paire and paire["pair_created"] and time.time() - paire["pair_created"] > LAUNCH_OLD_S:
+            self.db.put(f"lance:{mint}", int(time.time()))
+            return True
+        return False
 
     def reload_watchlist(self) -> None:
         self.watched = set()

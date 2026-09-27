@@ -56,11 +56,13 @@ class EvenementsMixin:
             await self._cluster_alert(ev, grp, is_dev, entries, akey)
         finally:
             self._inflight.discard(akey)
+
     def _known_old(self, mint: str | None) -> bool:
         """Token déjà connu comme vieux (plus de 24 h) : un token vieux le reste, inutile de le réanalyser
         (vu en vrai : un wallet rachetait le même vieux token toutes les 9 min, analyse complète à chaque fois)."""
         tok = self.db.token(mint) if mint else None
         return bool(tok and tok["created_at"] and time.time() - tok["created_at"] > YOUNG_TOKEN_S)
+
     async def _cluster_alert(self, ev: Event, grp: str, is_dev: bool, entries: dict[str, float], akey: str) -> None:
         if self._known_old(ev.mint):
             return
@@ -92,6 +94,7 @@ class EvenementsMixin:
         self.emit(alert)
         if self.on_cluster_entry:
             await self.on_cluster_entry(grp, ev.mint, list(entries), info, alert)
+
     def _why(self, wallet: str, action: str) -> str:
         """« DEV_XBC (découverte : $XBC a fait 11 M$) l'a créé » : pourquoi ce wallet compte."""
         w = self.db.wallet(wallet)
@@ -99,6 +102,7 @@ class EvenementsMixin:
         role = f" <i>({esc(w['role'])})</i>" if w and w["role"] else ""
         grp = f" · groupe {esc(w['grp'])}" if w and w["grp"] else ""
         return f"<b>{nom}</b>{role}{grp} {action}"
+
     def _head(self, ev: Event) -> str:
         line = A.wallet_line(ev.wallet, self.label(ev.wallet), self.group(ev.wallet))
         retard = int(time.time()) - ev.ts if ev.ts else 0
@@ -106,9 +110,11 @@ class EvenementsMixin:
             # Rattrapage après une coupure : l'événement n'est pas « en direct », il faut le savoir
             line += f"\n⏳ <b>Vu avec {A.age(retard)} de retard</b> (rattrapage après coupure)"
         return line
+
     def _amount(self, info: TokenInfo, ev: Event) -> str:
         pct = info.pct_supply(ev.tokens_raw)
         return f"{pct:.2f} % supply" if pct is not None else "part de supply inconnue"
+
     def _quick(self, key: str, kind: str, title: str, ev: Event, flags: list[str]) -> bool:
         """Alerte immédiate, avant l'analyse (qui prend quelques secondes) ; complétée ensuite.
 
@@ -142,6 +148,7 @@ class EvenementsMixin:
             return await self._create_alert(ev, key, usine)
         finally:
             self._inflight.discard(key)
+
     async def _create_alert(self, ev: Event, key: str, usine: list[str] | None = None) -> Alert:
         info = await self._info(ev.mint, ev.wallet)
         info.creator = info.creator or ev.wallet
@@ -167,6 +174,7 @@ class EvenementsMixin:
         return Alert(key, "create", text, A.token_buttons(info, ev.wallet), replace=True,
                      top_title="UN DEV SUIVI CRÉE UN TOKEN" if confiance else "",
                      top_why=self._why(ev.wallet, "l'a créé"), info=info, flags=flags)
+
     def _announcement_line(self, info: TokenInfo) -> list[str]:
         """Liaison avec l'agenda : ce token a-t-il été annoncé sur X ?"""
         ann = self.db.find_announcement((info.symbol or "").upper() or None, info.mint, int(time.time()) - 36 * 3600)
@@ -268,14 +276,20 @@ class EvenementsMixin:
             return None
         self._inflight.add(key)
         try:
+            if await self.already_trading(ev.mint):
+                # Vu en vrai après une purge : un ajout de liquidité sur le pool de $ASH (lancé la veille) repartait
+                # en « TRADING OUVERT ». Un token qui s'échange déjà n'ouvre pas son trading.
+                return self._skip("liquidité ajoutée à un token qui s'échange déjà")
             if not self._quick(key, "lp_add", "🟢 <b>LIQUIDITÉ AJOUTÉE : TRADING OUVERT", ev,
                                self.rug_flags(ev.wallet, ev.mint)):
                 return None
             return await self._lp_alert(ev, key)
         finally:
             self._inflight.discard(key)
+
     async def _lp_alert(self, ev: Event, key: str) -> Alert:
         info = await self._info(ev.mint)
+        self.db.put(f"lance:{ev.mint}", int(time.time()))   # souvenir « déjà lancé », gardé par la remise à zéro
         pct = info.pct_supply(ev.tokens_raw) if ev.tokens_raw else None
         detail = (f"💧 Dépôt : <b>{ev.sol:.2f} SOL</b> + {pct:.1f} % de la supply sur {esc(ev.dex or '?')}"
                   if pct is not None else f"💧 Première transaction sur {esc(ev.dex or '?')} pour ce contrat suivi")
@@ -437,6 +451,7 @@ class EvenementsMixin:
                     await self.on_ann_update(ann["id"])
         except Exception:
             log.exception("Traçage automatique impossible pour %s", creator)
+
     async def on_pumpportal_create(self, msg: dict) -> None:
         """PumpPortal voit la création avant Helius : alerte immédiate si le créateur est suivi."""
         creator = msg.get("traderPublicKey")

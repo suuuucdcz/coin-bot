@@ -32,6 +32,7 @@ class FauxCoinsMixin:
             await asyncio.sleep(delay)
             if await self.check_fake(ann_id, mint):
                 return
+
     async def _scan_existing_copies(self, ann_id: int) -> None:
         """Tokens au même ticker créés ces dernières 48 h (DexScreener) : faux coins déjà passés ?"""
         row = self.db.announcement(ann_id)
@@ -58,10 +59,12 @@ class FauxCoinsMixin:
                 self.p._spawn(self._watch_copy(ann_id, mint))  # encore jeune : on revérifie plus tard
             if len(seen) >= 6:
                 break
+
     def _with_proof(self, row, proof: str) -> str:
         det = json.loads(row["details"] or "{}")
         det["ca_proof"] = proof
         return json.dumps(det)
+
     def _protected(self, ann_id: int, mint: str) -> bool:
         """CA relié par une preuve forte (dev on-chain, compte officiel) : une chute de −80 % après le
         lancement est banale pour un vrai coin, ce n'est pas un faux coin."""
@@ -69,6 +72,7 @@ class FauxCoinsMixin:
         if not row or row["ca"] != mint:
             return False
         return json.loads(row["details"] or "{}").get("ca_proof") in ("fort", "officiel", "annonce")
+
     async def check_fake(self, ann_id: int, mint: str) -> bool:
         from . import fakes
         if mint in self._fakes_done:
@@ -85,6 +89,7 @@ class FauxCoinsMixin:
         self._fakes_done.add(mint)
         await self._on_fake(ann_id, rep)
         return True
+
     async def _on_fake(self, ann_id: int, rep) -> None:
         ann = self.db.announcement(ann_id)
         if not ann:
@@ -177,12 +182,14 @@ class FauxCoinsMixin:
                         + " · détails dans 🎭 Faux coins du jour",
                         topic="agenda", reply_to=ann["msg_id"], key=f"fake-ag:{rep.mint}", kind="agenda")
         self._fakes_dirty = True
+
     def _fake_of_dev(self, ann, creator: str | None) -> dict | None:
         """Le créateur est-il un wallet du dev repéré grâce à un faux coin de cette annonce ?"""
         for f in json.loads(ann["details"] or "{}").get("fakes", []):
             if f.get("from_dev") and creator in (f.get("dev"), f.get("creator")):
                 return f
         return None
+
     async def _notify_real(self, ann, mint: str, creator: str | None) -> None:
         """🎯 Le dev du faux coin lance un nouveau coin : très probablement le VRAI."""
         f = self._fake_of_dev(ann, creator)
@@ -200,6 +207,7 @@ class FauxCoinsMixin:
             + (f"Lancement annoncé : {paris(ann['launch_ts'])} (Paris) — on est {countdown(ann['launch_ts'])}\n" if ann["launch_ts"] else "")
             + "⚡ Probablement le VRAI, avant le call public. Je le réanalyse dans 15 min au cas où ce serait un 2e faux.",
             self._token_buttons(mint, ann), topic="fakes", key=f"real:{mint}", kind="fakes")
+
     def render_fakes(self) -> str:
         """Message épinglé du compartiment 🎭 : faux coins des coins annoncés aujourd'hui."""
         today = int(datetime.now(PARIS).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -227,6 +235,7 @@ class FauxCoinsMixin:
         text = "\n".join(out)
         text = text[:3700] + ("\n… (tronqué)" if len(text) > 3700 else "")
         return text + "\n\n" + SECTION_INFO["fakes"]
+
     async def _refresh_fakes(self) -> None:
         text = self.render_fakes()
         if text == self._last_fakes_render and not self._fakes_dirty:

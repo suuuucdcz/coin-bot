@@ -23,6 +23,7 @@ class AffichageMixin:
 
     def _posted(self, ann_id: int) -> bool:
         return self.db.alert_already_sent(f"ann:{ann_id}")
+
     def _should_post(self, row) -> bool:
         """Une fiche seulement pour un lancement à venir : heure connue (−1 h à +48 h) ou CA frais."""
         if row["ca"]:
@@ -32,6 +33,7 @@ class AffichageMixin:
             return True  # rumeur sans heure, mais on a trouvé le dev ou un faux coin : ça vaut une fiche
         lt = row["launch_ts"]
         return bool(lt and time.time() - 3600 <= lt <= time.time() + 48 * 3600)
+
     async def _maybe_post(self, ann_id: int) -> None:
         row = self.db.announcement(ann_id)
         if not row or self._posted(ann_id) or not self._should_post(row):
@@ -46,6 +48,7 @@ class AffichageMixin:
         elif not json.loads(row["details"] or "{}").get("hunt_done"):
             self.p._spawn(self.hunt_dev(ann_id))
         self._dirty = True
+
     def card(self, row) -> tuple[str, dict]:
         """Fiche complète d'un coin annoncé (mise à jour en place à chaque nouvelle info)."""
         now = int(time.time())
@@ -162,11 +165,13 @@ class AffichageMixin:
         if row["dev"]:
             links.append(("Wallet dev", f"https://solscan.io/account/{row['dev']}"))
         return "\n".join(lines), buttons(*links, per_row=3)
+
     async def update_card(self, ann_id: int) -> None:
         row = self.db.announcement(ann_id)
         if row and row["msg_id"]:
             text, markup = self.card(row)
             await self.tg.edit_now(int(row["msg_id"]), text, markup)
+
     def _token_buttons(self, mint: str, ann) -> dict:
         return buttons(("pump.fun", f"https://pump.fun/coin/{mint}"), ("Solscan", f"https://solscan.io/token/{mint}"),
                        ("DexScreener", f"https://dexscreener.com/solana/{mint}"),
@@ -219,6 +224,7 @@ class AffichageMixin:
         if len(text) + len(legende) > 4000:
             text = text[:3950 - len(legende)].rsplit("\n", 1)[0] + "\n… (liste tronquée)"
         return text + legende
+
     def _line(self, r, now: int) -> str:
         when = f"<b>{paris(r['launch_ts'])}</b>" if r["launch_ts"] else "<b>--:--</b>"
         tick = f"${esc(r['ticker'])}" if r["ticker"] else "?"
@@ -256,6 +262,7 @@ class AffichageMixin:
         for f in json.loads(r["flags"] or "[]")[:2]:
             detail.append(f"🚩 {esc(f)}")
         return parts[0] + "\n    " + " · ".join(detail)
+
     async def refresh_loop(self) -> None:
         while True:
             try:
@@ -263,6 +270,7 @@ class AffichageMixin:
             except Exception:
                 log.exception("Agenda non mis à jour")
             await asyncio.sleep(20)
+
     async def _post_pending(self) -> None:
         """Fiches à publier (ajouts manuels, rumeurs devenues datées) + rappels horaires."""
         now = int(time.time())
@@ -290,9 +298,11 @@ class AffichageMixin:
             elif -600 <= lt - now <= 0:
                 self.tg.enqueue(f"🚀 <b>C'est l'heure : ${tick}</b> ({paris(lt)} Paris) — j'attends le pool / la création",
                                 topic="agenda", reply_to=row["msg_id"], key=f"remind0:{row['id']}", kind="agenda")
+
     async def _resolve_later(self, ann_id: int) -> None:
         await asyncio.sleep(5)  # laisse le temps à la fiche d'être publiée (pour la mettre à jour ensuite)
         await self.resolve(ann_id)
+
     async def _refresh(self) -> None:
         try:
             await self._refresh_fakes()

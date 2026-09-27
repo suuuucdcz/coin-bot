@@ -40,6 +40,7 @@ class CandidatsMixin:
     def _open_announcements(self, ticker: str) -> list:
         since = int(time.time()) - MATCH_WINDOW_S
         return [r for r in self.db.announcements_since(since) if not r["ca"] and norm_ticker(r["ticker"]) == ticker]
+
     async def on_new_token(self, msg: dict) -> None:
         """PumpPortal : un token pump.fun vient d'être créé. Est-ce un coin annoncé ?"""
         creator = msg.get("traderPublicKey")
@@ -62,6 +63,7 @@ class CandidatsMixin:
         for ann in anns:
             await self._candidate(ann, msg["mint"], msg.get("traderPublicKey"), twitter, "pump.fun",
                                   f"{msg.get('solAmount', 0):.2f} SOL achetés par le créateur")
+
     async def _meta(self, uri: str | None) -> dict:
         if not uri:
             return {}
@@ -71,6 +73,7 @@ class CandidatsMixin:
                 return d if isinstance(d, dict) else {}
         except Exception:
             return {}
+
     async def _candidate(self, ann, mint: str, creator: str | None, meta_twitter: str | None, where: str,
                          detail: str = "", by_dev: bool = False, verify: bool = False,
                          created_ts: int | None = None) -> None:
@@ -137,6 +140,7 @@ class CandidatsMixin:
         else:
             self._copies[ann["id"]] = self._copies.get(ann["id"], 0) + 1
             self._dirty = True
+
     async def _confirm(self, ann, mint: str, creator: str | None, where: str, detail: str,
                        ev: xlinks.Evidence) -> None:
         """Preuve forte : le token est relié à l'annonce (alerte 🎯, puis dev et satellites)."""
@@ -178,6 +182,7 @@ class CandidatsMixin:
             except Exception:
                 log.exception("Alerte « à ne pas rater » impossible pour %s", mint)
         self.p._spawn(self.resolve(ann["id"]))
+
     async def _verify_official(self, ann_id: int, mint: str, creator: str | None, where: str) -> None:
         """Lien dans l'autre sens : le compte officiel affiche-t-il CE contrat ? (= preuve forte)"""
         if (ann_id, mint) in self._verifying:
@@ -198,6 +203,7 @@ class CandidatsMixin:
             log.exception("Vérification impossible pour %s", mint)
         finally:
             self._verifying.discard((ann_id, mint))
+
     async def _official_shows(self, handle: str | None, mint: str) -> str | None:
         from .hunt import URL_RE, _fetch, _is_site
         if not handle or not self.xw:
@@ -213,6 +219,7 @@ class CandidatsMixin:
             if mint in (tw.get("text") or "") + " ".join(tw.get("links") or []):
                 return f"@{handle} a publié ce CA sur X"
         return None
+
     async def poll_dexscreener(self) -> None:
         """Lancements hors pump.fun : cherche le ticker sur DexScreener autour de l'heure annoncée."""
         while True:
@@ -241,6 +248,7 @@ class CandidatsMixin:
                                           pr.get("dexId") or "DEX",
                                           created_ts=int((pr.get("pairCreatedAt") or 0) / 1000) or None)
                 await asyncio.sleep(2)
+
     async def mark_launched(self, mint: str) -> None:
         row = self.db.find_announcement(None, mint, 0)
         if row:

@@ -189,3 +189,17 @@ def test_vente_d_un_token_non_suivi_sans_appel_reseau(setup, monkeypatch):  # no
     a = asyncio.run(p.process(Event("sell", WATCHED, "v2", int(time.time()), MINT, sol=3.0, tokens_raw=10**14,
                                     pre_tokens_raw=15 * 10**13)))
     assert a is not None and "RÉSERVE VEND" in a.text
+
+
+def test_liquidite_sur_un_token_deja_en_bourse_pas_trading_ouvert(setup, monkeypatch):  # noqa: F811
+    # Vu en vrai après une purge : un ajout de liquidité sur le pool de $ASH (lancé la veille) = « TRADING OUVERT »
+    from radar import pipeline as pl
+    p, tg, db = setup
+    p.http = object()
+
+    async def paire(http, mint):
+        return {"pair_created": int(time.time()) - 20 * 3600}
+    monkeypatch.setattr(pl.dexscreener, "token_pairs", paire)
+    ev = Event("lp_add", WATCHED, "lp1", int(time.time()), MINT, sol=40.0, tokens_raw=10**14)
+    assert asyncio.run(p.process(ev)) is None and tg.sent == []
+    assert "s'échange déjà" in p.decisions_line() and db.get(f"lance:{MINT}")
