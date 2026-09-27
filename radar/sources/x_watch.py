@@ -216,6 +216,12 @@ class XWatcher:
         args = ["--disable-blink-features=AutomationControlled"]
         if sys.platform.startswith("linux"):
             args.append("--disable-dev-shm-usage")   # petits serveurs : /dev/shm trop petit pour Chromium
+        if getattr(self.cfg, "x_light", False):
+            # 1 Go de mémoire : un seul processus de rendu, pas d'isolation par site ni de services annexes
+            # (vu en vrai : 0 tweet sur le serveur, la page n'avait pas fini de s'afficher en 20 s)
+            args += ["--disable-gpu", "--renderer-process-limit=1", "--disable-extensions",
+                     "--disable-background-networking", "--disable-features=site-per-process,IsolateOrigins,"
+                     "Translate,MediaRouter,OptimizationHints"]
         ctx = await pw.chromium.launch_persistent_context(
             str(self.cfg.x_profile_dir), channel=channel, headless=headless,
             viewport={"width": 1280, "height": 900}, args=args)
@@ -269,7 +275,9 @@ class XWatcher:
 
     async def _tweets(self, page) -> list[dict]:
         try:
-            await page.wait_for_selector('article[data-testid="tweet"]', timeout=20000)
+            # Petit serveur : la page peut mettre bien plus de 20 s à s'afficher
+            await page.wait_for_selector('article[data-testid="tweet"]',
+                                         timeout=45000 if getattr(self.cfg, "x_light", False) else 20000)
         except Exception:
             return []
         seen: dict[str, dict] = {}
@@ -299,7 +307,7 @@ class XWatcher:
         if not await self._goto(page, f"https://x.com/{handle}"):
             return None
         try:
-            await page.wait_for_selector('[data-testid="UserName"]', timeout=15000)
+            await page.wait_for_selector('[data-testid="UserName"]', timeout=35000 if getattr(self.cfg, "x_light", False) else 15000)
         except Exception:
             return None
         await asyncio.sleep(random.uniform(1, 2))
