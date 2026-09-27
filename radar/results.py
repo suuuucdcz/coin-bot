@@ -119,6 +119,15 @@ def report_text(rows, days: int = 7) -> str:
         rugs = sum(1 for r in lot if _rug(r))
         lignes.append(f"<b>{nom}</b> : {len(lot)} · ×2 : {hauts} ({100 * hauts // len(lot)} %) · ×5 : {gros} · "
                       f"rug : {rugs} ({100 * rugs // len(lot)} %)")
+        if kind == "top":
+            # Le contrôle à +5 min prédit-il la suite ?
+            for verdict, libelle in (("ok", "✅ tenait à +5 min"), ("suspect", "⚠️ suspect à +5 min")):
+                sous = [r for r in lot if r["check5"] == verdict]
+                if sous:
+                    h = sum(1 for r in sous if _mult(r) >= HIT)
+                    g = sum(1 for r in sous if _rug(r))
+                    lignes.append(f"    {libelle} : {len(sous)} · ×2 : {100 * h // len(sous)} % · "
+                                  f"rug : {100 * g // len(sous)} %")
     par_confiance: dict[str, list] = {}
     for r in mesures:
         if r["kind"] != "top":

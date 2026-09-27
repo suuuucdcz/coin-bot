@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS results (   -- suivi des alertes sur 24 h (radar/resu
     mc_24h     REAL,
     last_mc    REAL,
     last_check INTEGER,
-    done       INTEGER DEFAULT 0
+    done       INTEGER DEFAULT 0,
+    check5     TEXT                   -- « ‼️ » : verdict du contrôle à +5 min (ok / suspect)
 );
 CREATE INDEX IF NOT EXISTS results_open ON results(done, sent_at);
 """
@@ -122,7 +123,7 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         # Colonnes ajoutées après coup (bases déjà créées)
-        for ddl in ("ALTER TABLE announcements ADD COLUMN details TEXT",):
+        for ddl in ("ALTER TABLE announcements ADD COLUMN details TEXT", "ALTER TABLE results ADD COLUMN check5 TEXT"):
             try:
                 self.conn.execute(ddl)
             except sqlite3.OperationalError:
@@ -327,6 +328,10 @@ class DB:
             "mc_1h=CASE WHEN mc_1h IS NULL AND ?>=3600 THEN ? ELSE mc_1h END, "
             "mc_24h=CASE WHEN ?>=86400 THEN ? ELSE mc_24h END, done=CASE WHEN ?>=86400 THEN 1 ELSE 0 END WHERE key=?",
             (mc0, haut or None, mc, now, age, mc, age, mc, age, key))
+        self.conn.commit()
+
+    def set_result_check(self, key: str, verdict: str) -> None:
+        self.conn.execute("UPDATE results SET check5=? WHERE key=?", (verdict, key))
         self.conn.commit()
 
     def results_since(self, since: int) -> list[sqlite3.Row]:

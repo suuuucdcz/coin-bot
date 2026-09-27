@@ -292,9 +292,9 @@ def test_contrat_lance_plus_jamais_en_attente(pipe):
 
 
 def test_alerte_bloquee_faute_de_donnees_repart_quand_elles_arrivent(pipe, monkeypatch):
-    from radar import pipeline as pl
+    from radar import top
     p, db = pipe
-    monkeypatch.setattr(pl, "TOP_RETRY_S", (0, 0))
+    monkeypatch.setattr(top, "TOP_RETRY_S", (0, 0))
     envoye = []
 
     class TG:

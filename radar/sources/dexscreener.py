@@ -53,6 +53,10 @@ async def token_pairs(session: aiohttp.ClientSession, mint: str) -> dict | None:
         "mc": best.get("marketCap") or best.get("fdv"),
         "liquidity": (best.get("liquidity") or {}).get("usd"),
         "pair_created": (best.get("pairCreatedAt") or 0) // 1000,
+        # Activité des 5 dernières minutes (contrôle d'une alerte « à ne pas rater »)
+        "buys5": ((best.get("txns") or {}).get("m5") or {}).get("buys"),
+        "sells5": ((best.get("txns") or {}).get("m5") or {}).get("sells"),
+        "change5": (best.get("priceChange") or {}).get("m5"),
         "socials": {s.get("type"): s.get("url") for s in info.get("socials") or []},
         "website": next((w.get("url") for w in info.get("websites") or []), None),
     }

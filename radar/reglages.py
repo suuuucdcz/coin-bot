@@ -20,6 +20,7 @@ FUNDED_MAX_24H = 12            # au-delà, un financeur est un distributeur : se
 FACTORY_FLAG_24H = 3           # 3 tokens créés en 24 h : signal grave (lanceur en série)
 FACTORY_UNWATCH_24H = 5        # 5 tokens créés en 24 h : usine / plateforme de lancement, plus un dev à suivre
 SUPPLY_OUT_MIN_PCT = 1.0       # déplacement de supply signalé au-delà de 1 % de la supply
+CHECK5_S = 300                 # contrôle d'une alerte « à ne pas rater » 5 min après l'envoi
 TOP_RETRY_S = (60, 180)        # alerte « à ne pas rater » retentée quand seules des données manquaient
 LAUNCH_OLD_S = 30 * 60        # pool plus vieux que ça : le token s'échange déjà, ce n'est plus un lancement
 INDEPENDENT_GROUPS = {"découverte", "manuel"}   # wallets rassemblés par le radar, sans lien entre eux

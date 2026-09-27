@@ -179,3 +179,44 @@ def test_drapeau_leger_de_l_annonce_affiche_dans_a_ne_pas_rater(setup):
                            flags=json.dumps(["@AshbornCoin : très peu d'abonnés (226)"]))
     creer(db, tg, "découverte")
     assert len(tg.top) == 1 and "très peu d'abonnés (226)" in tg.top[0][0]
+
+
+# --- contrôle à +5 min ---------------------------------------------------------------------------------
+def _info(**k):
+    base = dict(name="Ashborn", symbol="ASH", creator=WATCHED, mc_usd=25_000, top10_pct=18.0, dev_pct=3.0)
+    return TokenInfo(MINT, **{**base, **k})
+
+
+def test_verdict_5min_ca_tient():
+    from radar.top import verdict_5min
+    tient, raisons, chiffres = verdict_5min(_info(), _info(mc_usd=40_000), {"buys5": 120, "sells5": 40})
+    assert tient and raisons == [] and "MC 25.0 k$ → 40.0 k$ (+60%)" in chiffres[0]
+
+
+def test_verdict_5min_devenu_suspect():
+    from radar.top import verdict_5min
+    apres = _info(mc_usd=12_000, dev_pct=0.0, flags=["top 10 des détenteurs = 52 % de la supply"])
+    tient, raisons, _ = verdict_5min(_info(), apres, {"buys5": 20, "sells5": 60})
+    assert not tient
+    assert any("top 10" in r for r in raisons) and any("-52%" in r for r in raisons)
+    assert any("ventes dominent" in r for r in raisons) and any("le dev a vendu" in r for r in raisons)
+
+
+def test_controle_5min_envoye_et_note_dans_les_resultats(setup, monkeypatch):
+    from radar import results as R
+    from radar import top
+    db, tg = setup
+    monkeypatch.setattr(top, "CHECK5_S", 0)
+    db.add_wallet(WATCHED, "DEV_XBC_7m2S", "découverte", "dev (découverte : $XBC, MC 11.7 M$ vérifiée DexScreener)", 0, None)
+    p = pl.Pipeline(cfgmod.load(), db, rpc=None, http=None, tg=tg)
+    p.results = R.Results(db, None)
+    ev = Event("create", WATCHED, "sig", int(time.time()), MINT, sol=1.0, tokens_raw=10**13, extra={"symbol": "ASH"})
+
+    async def go():
+        p.emit(await p.process(ev))
+        for _ in range(50):
+            await asyncio.sleep(0)
+    asyncio.run(go())
+    textes = [t for t, _m, _k in tg.top]
+    assert len(textes) == 2 and "ÇA TIENT" in textes[1] and "Contrôle 5 min après" in textes[1]
+    assert [r["check5"] for r in db.results_since(0) if r["kind"] == "top"] == ["ok"]

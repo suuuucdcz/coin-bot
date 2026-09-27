@@ -17,17 +17,18 @@ import aiohttp
 from . import alerts as A
 from .alerte import Alert, KIND_TOPIC, RUG_MARK
 from .analysis.classify import Event, analyze, programs
-from .analysis.enrich import TokenInfo, missing_data, purge_cache, token_info
+from .analysis.enrich import TokenInfo, purge_cache, token_info
 from .confiance import is_dev_role, is_service, wallet_trust, watch_priority
 from .config import Config
 from .db import DB
 from .evenements import EvenementsMixin
 from .reglages import (
     BURST_WINDOW_S, CLUSTER_WINDOW_S, FACTORY_FLAG_24H, FACTORY_UNWATCH_24H, FARM_MIN_TOKENS, FARM_WINDOW_S,
-    LAUNCH_OLD_S, SNIPER_MIN_TOKENS, TOP_KINDS, TOP_RETRY_S, TRADE_KINDS, TRADE_MAX_PER_HOUR, TRADE_MUTE_S)
+    LAUNCH_OLD_S, SNIPER_MIN_TOKENS, TRADE_KINDS, TRADE_MAX_PER_HOUR, TRADE_MUTE_S)
 from .sources import dexscreener
 from .sources.helius import AMM_PROGRAMS, LogsWatcher, SolanaRPC, account_keys, in_background, sol_deltas
 from .telegram import Telegram, esc
+from .top import TopMixin
 
 # Réexportés : les autres modules et les tests les importent depuis radar.pipeline
 __all__ = ["Pipeline", "run_signature_cli", "Alert", "wallet_trust", "is_dev_role", "RUG_MARK", "KIND_TOPIC"]
@@ -39,7 +40,7 @@ log = logging.getLogger("pipeline")
 _SKIPPED: ContextVar[list | None] = ContextVar("skipped", default=None)
 
 
-class Pipeline(EvenementsMixin):
+class Pipeline(TopMixin, EvenementsMixin):
     def __init__(self, cfg: Config, db: DB, rpc: SolanaRPC, http: aiohttp.ClientSession,
                  tg: Telegram | None = None, watcher: LogsWatcher | None = None, dry_run: bool = False):
         self.cfg, self.db, self.rpc, self.http = cfg, db, rpc, http
@@ -408,68 +409,6 @@ class Pipeline(EvenementsMixin):
         t = asyncio.create_task(coro if urgent else in_background(coro))
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
-
-    # --- envoi ------------------------------------------------------------------------
-    def _emit_top(self, alert: Alert) -> None:
-        """Copie courte dans « 🎯 À ne pas rater » si le signal est vérifié et sans drapeau grave."""
-        if not (alert.info and self.tg and not self.dry_run) or alert.kind not in TOP_KINDS:
-            return
-        mint = alert.info.mint
-        if not alert.top_title:
-            log.info("Pas « à ne pas rater » (wallet pas de confiance : satellite, lointain ou à éviter) : %s", mint)
-            self._skip("pas « à ne pas rater » : wallet pas de confiance")
-            return
-        # Drapeaux de l'annonce X reliée à ce contrat (arnaque, abonnés achetés, compte racheté, imitation…) :
-        # ils n'étaient pas pris en compte (vu à la relecture : un coin annoncé par un compte racheté pouvait
-        # arriver dans ‼️ dès l'ouverture du trading).
-        annonce = self._announcement_flags(mint)
-        flags = list(alert.info.flags) + list(alert.flags or []) + annonce
-        if not A.is_safe(flags):
-            grave = next((f for f in flags if A.RUG_MARK in f or any(s in f.lower() for s in A.SEVERE)), "?")
-            log.info("Pas « à ne pas rater » (signal grave : %s) : %s", grave[:90], mint)
-            self._skip("pas « à ne pas rater » : signal grave")
-            return  # ⛔ / 🟠 : reste dans le groupe, jamais dans les alertes « à ne pas rater »
-        manque = missing_data(alert.info)
-        if manque:
-            # Vu en vrai : pump.fun ne répondait plus, tout sortait 🟢 faute de données. Pas de données = pas sûr.
-            # Mais une market cap pas encore indexée (pool tout neuf) se complète en 1 à 3 min : on réessaie.
-            log.info("Pas « à ne pas rater » pour l'instant (données incomplètes : %s) : %s", ", ".join(manque),
-                     alert.info.mint)
-            if not getattr(alert, "retried", False):
-                self._spawn(self._retry_top(alert))
-            return self._skip("pas « à ne pas rater » pour l'instant : données incomplètes")
-        if alert.info.age_s is not None and alert.info.age_s > 6 * 3600:
-            log.info("Pas « à ne pas rater » (token de plus de 6 h, plus un lancement) : %s", mint)
-            return self._skip("pas « à ne pas rater » : token trop vieux")
-        text = A.top_card(alert.info, alert.top_title, alert.top_why, list(alert.flags or []) + annonce)
-        cle = f"top:{alert.kind}:{alert.info.mint}"
-        if self.tg.enqueue_top(text, A.top_buttons(alert.info, getattr(self.cfg, "trade_url", "")), key=cle,
-                               event_ts=alert.event_ts):
-            log.info("🎯 À ne pas rater : %s %s", alert.kind, alert.info.mint)
-            self._track(alert, key=cle, kind="top")
-
-    def _announcement_flags(self, mint: str) -> list[str]:
-        ann = self.db.find_announcement(None, mint, 0)
-        if not ann or ann["ca"] != mint:
-            return []
-        try:
-            return [str(f) for f in json.loads(ann["flags"] or "[]")]
-        except ValueError:
-            return []
-
-    async def _retry_top(self, alert: Alert) -> None:
-        """Relit le token après 1 puis 3 min : s'il est maintenant complet et propre, il part dans ‼️."""
-        from .analysis import enrich
-        for attente in TOP_RETRY_S:
-            await asyncio.sleep(attente)
-            enrich._cache.pop(alert.info.mint, None)
-            info = await self._info(alert.info.mint, alert.info.creator)
-            if not missing_data(info):
-                alert.info, alert.retried = info, True
-                alert.top_why += f" <i>(données complètes après {attente // 60 or 1} min)</i>"
-                self._emit_top(alert)
-                return
-        log.info("Pas « à ne pas rater » : données toujours incomplètes après 3 min pour %s", alert.info.mint)
 
     def _skip(self, raison: str) -> None:
         """Note pourquoi un événement n'a pas donné d'alerte (visible dans /statut et le journal)."""
