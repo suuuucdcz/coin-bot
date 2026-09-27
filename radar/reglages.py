@@ -1,7 +1,7 @@
 """Réglages du pipeline : seuils et fenêtres de temps (valeurs apprises sur des cas réels)."""
 from __future__ import annotations
 
-TOP_KINDS = ("create", "cluster", "lp_add", "match", "smart")   # alertes qui peuvent aller dans « ‼️ À ne pas rater »
+TOP_KINDS = ("create", "cluster", "lp_add", "match", "smart", "relance")   # alertes qui peuvent aller dans « ‼️ À ne pas rater »
 YOUNG_TOKEN_S = 24 * 3600      # « mint jeune » = moins de 24 h
 NEW_WALLET_MAX_TX = 5          # un wallet avec moins de 5 tx = nouveau wallet
 SUPPLY_IN_MIN_PCT = 1.0        # réception de supply significative

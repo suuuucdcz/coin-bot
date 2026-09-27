@@ -12,7 +12,7 @@ KIND_TOPIC = {"create": "onchain", "buy": "onchain", "supply_in": "onchain", "lp
               "sell": "onchain", "transfer": "clusters", "funding": "clusters", "cex": "clusters",
               "trace": "devs", "mute": "clusters", "cluster": "onchain", "discovery": "devs",
               "system": "system", "resultats": "resultats",
-              "smart": "onchain"}
+              "smart": "onchain", "relance": "onchain"}
 
 
 @dataclass

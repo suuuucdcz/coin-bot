@@ -48,6 +48,7 @@ class Pipeline(TopMixin, EvenementsMixin):
         self.tg, self.watcher, self.dry_run = tg, watcher, dry_run
         self.watched: set[str] = set()
         self.results = None            # suivi des résultats (radar/results.py), branché par main.py
+        self.lancements = None         # remontée des lancements qui décollent (radar/lancements.py)
         self.mints: set[str] = set()   # adresses de la watchlist qui sont des contrats de token
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._burst: dict[str, list[float]] = defaultdict(list)

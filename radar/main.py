@@ -22,6 +22,7 @@ from .bot import MENU, Bot
 from .db import DB
 from .pipeline import Pipeline
 from .results import Results
+from .lancements import LaunchWatch
 from .smart import SmartMoney
 from .sources import pumpportal
 from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background, notable_logs
@@ -122,9 +123,12 @@ async def amain() -> int:
             else:
                 log.warning("Veille X désactivée : pas encore de session X (%s)", cfgmod.AIDE_X)
 
+        pipeline.lancements = LaunchWatch(pipeline)   # remontée des lancements qui décollent (🔗)
+
         async def on_new_token(msg: dict) -> None:
             await pipeline.on_pumpportal_create(msg)
             await agenda.on_new_token(msg)
+            pipeline.lancements.on_new_token(msg)
 
         heure: dict[str, deque] = defaultdict(deque)
         bavards: dict[str, float] = {}
@@ -395,7 +399,8 @@ async def amain() -> int:
                  bot.run(), bot.dashboard(),
                  *[worker() for _ in range(WORKERS)], pumpportal.run(on_new_token),
                  in_background(agenda.refresh_loop()), in_background(agenda.poll_dexscreener()),
-                 pipeline.results.loop(), in_background(SmartMoney(pipeline).loop())]
+                 pipeline.results.loop(), in_background(SmartMoney(pipeline).loop()),
+                 in_background(pipeline.lancements.loop())]
         if xwatcher:
             tasks.append(in_background(xwatcher.run()))
         if cfg.discovery_enabled:
