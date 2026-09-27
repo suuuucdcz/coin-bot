@@ -203,3 +203,30 @@ def test_liquidite_sur_un_token_deja_en_bourse_pas_trading_ouvert(setup, monkeyp
     ev = Event("lp_add", WATCHED, "lp1", int(time.time()), MINT, sol=40.0, tokens_raw=10**14)
     assert asyncio.run(p.process(ev)) is None and tg.sent == []
     assert "s'échange déjà" in p.decisions_line() and db.get(f"lance:{MINT}")
+
+
+def test_satellite_qui_finance_des_wallets_neufs_ignore(setup):  # noqa: F811
+    # Vu en vrai ($AXEL) : deux satellites ont financé 24 wallets neufs en 5 min (ferme de bots)
+    p, tg, db = setup
+    p.rpc = FakeRPC()
+    sat = "SATBmFdxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    db.add_wallet(sat, "SAT_BmFd", "$AXEL", "a financé le détenteur de 1 % (0.13 SOL)", 1, None)
+    a = asyncio.run(p.process(Event("transfer", sat, "f1", int(time.time()), other="NEUFzz" + "z" * 34, sol=0.5)))
+    assert a is None and "satellite (bot probable)" in p.decisions_line()
+    assert db.wallet("NEUFzz" + "z" * 34) is None
+
+
+def test_bank_d_un_reseau_a_rugs_toujours_suivi(setup):  # noqa: F811
+    # Vu en vrai ($WAIF) : BANK_WOTF_GVXP (réseau Reserve) finance 200 SOL au futur dev : alerte avant la création
+    p, tg, db = setup
+    p.rpc = FakeRPC()
+    bank = "GVXPbankxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    db.add_wallet(bank, "BANK_WOTF_GVXP", "reserve-suspect", "financeur lié au cluster reserve-suspect", 1, None)
+    a = asyncio.run(p.process(Event("transfer", bank, "f2", int(time.time()), other="DEVneuf" + "d" * 33, sol=200.0)))
+    assert a is not None and "NOUVEAU WALLET FINANCÉ" in a.text and db.wallet("DEVneuf" + "d" * 33)
+
+
+def test_adresse_coupee_pour_tempete_jamais_reprise(setup):  # noqa: F811
+    p, tg, db = setup
+    db.put("tempete:BOTxxx", 1)
+    assert asyncio.run(p.watch("BOTxxx", "NEW_BOT", "g", "financé par X", 1, None)) is False

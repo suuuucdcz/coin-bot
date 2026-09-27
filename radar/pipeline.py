@@ -244,6 +244,8 @@ class Pipeline(TopMixin, EvenementsMixin):
             return False
         if is_service(None, self.db.get_label(address)):
             return False  # un exchange enverrait des centaines de « fundings » sans rapport
+        if self.db.get(f"tempete:{address}"):
+            return False  # adresse coupée pour flot de transactions (bot / programme) : elle reste coupée
         if address not in self.watched and len(self.watched) >= self.cfg.watch_max:
             # Plafond atteint : un wallet important (dev, wallet financé par un bank) prend la place du
             # satellite le moins actif. Sans ça, les satellites des annonces X rempliraient la watchlist

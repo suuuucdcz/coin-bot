@@ -399,6 +399,12 @@ class EvenementsMixin:
         key = f"fund:{src}:{dst}"
         if self.already(key):
             return None
+        if src_row is not None and self.trust(src) == "faible" and not is_dev_role(src_row["role"]) \
+                and not is_upstream_role(src_row["role"]) and (src_row["grp"] or "") not in self.bad_groups():
+            # Vu en vrai ($AXEL) : deux « satellites » (ils avaient financé un détenteur) ont financé 24 wallets neufs
+            # en 5 min : une ferme de bots, pas un dev qui prépare son lancement. Alertes et ajouts inutiles, et
+            # un flot de notifications qui mange le quota Helius.
+            return self._skip("financement par un satellite (bot probable) : non suivi")
         finances = self.db.conn.execute("SELECT COUNT(*) FROM wallets WHERE parent=? AND added_at > ?",
                                         (src, int(time.time()) - 86400)).fetchone()[0]
         if finances >= FUNDED_MAX_24H:
@@ -407,7 +413,9 @@ class EvenementsMixin:
             if not self.dry_run:
                 self.db.mark_alert_sent(key, "funding")
             return self._skip("financeur en série : nouveaux wallets non ajoutés")
-        nb = len(await self.rpc.signatures(dst, limit=NEW_WALLET_MAX_TX + 1))
+        # Transactions du wallet AVANT ce financement (et pas au moment où on vérifie : un dev qui crée son token
+        # dans la foulée aurait déjà 5 tx et passerait pour un vieux wallet)
+        nb = len(await self.rpc.signatures(dst, before=ev.signature, limit=NEW_WALLET_MAX_TX + 1))
         if nb >= NEW_WALLET_MAX_TX:
             return self._skip("paiement vers un wallet existant")  # pas un nouveau dev
         depth = (src_row["depth"] if src_row else 0) + 1

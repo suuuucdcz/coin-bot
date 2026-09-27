@@ -9,7 +9,7 @@ import asyncio
 import logging
 import sys
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
 import aiohttp
 
@@ -39,7 +39,12 @@ MUTE_PER_MINUTE = 150        # au-delà, l'adresse est mise en sourdine (anti-fl
 MUTE_S = 20 * 60             # courte : un bank qui finance 100 relais d'un coup ne doit pas masquer le lancement
 NOISY_PER_HOUR = 40          # au-delà : wallet « bavard », seules les tx notables sont téléchargées
 SERVICE_PER_HOUR = 200       # au-delà : même les virements de SOL sont ignorés (distributeur, bot)
-NOISY_KEEP_S = 24 * 3600     # un wallet bavard le reste 24 h (pas 40 tx gaspillées à chaque heure)
+NOISY_KEEP_S = 24 * 3600
+# Tempête : une adresse qui reçoit plus de 600 notifications en 10 min (1/s, échecs compris). Vu en vrai : ~200 000
+# notifications en 1 h (fermes de bots), jetées une à une mais STREAMÉES par Helius (2 crédits par 0,1 Mo).
+STORM_WINDOW_S = 600
+STORM_MAX = 600
+STORM_DEPTH0_PAUSE_S = 6 * 3600     # un wallet bavard le reste 24 h (pas 40 tx gaspillées à chaque heure)
 HELIUS_FREE_CREDITS = 1_000_000
 BACKFILL_MAX_AGE_S = 30 * 60
 SHORT_GAP_S = 10 * 60        # coupure courte : on ne rattrape pas les wallets qui dorment depuis 3 jours
@@ -123,12 +128,39 @@ async def amain() -> int:
 
         heure: dict[str, deque] = defaultdict(deque)
         bavards: dict[str, float] = {}
+        notifs_addr: Counter[str] = Counter()          # toutes les notifications par adresse (bilan des 15 min)
+        tempete: dict[str, deque] = defaultdict(deque)
+        pauses: dict[str, float] = {}                   # watchlist de départ coupée temporairement
+
+        async def couper_tempete(addr: str) -> None:
+            w = db.wallet(addr)
+            nom = pipeline.label(addr) or addr[:6]
+            if w is not None and w["depth"] == 0:
+                pauses[addr] = time.time() + STORM_DEPTH0_PAUSE_S   # watchlist de départ : pause de 6 h seulement
+                await watcher.remove(addr)
+                duree = f"en pause {STORM_DEPTH0_PAUSE_S // 3600} h"
+            else:
+                db.put(f"tempete:{addr}", int(time.time()))
+                await pipeline.unwatch([addr])
+                duree = "retiré de la surveillance"
+            log.warning("%s : plus de %d transactions en %d min : %s", nom, STORM_MAX, STORM_WINDOW_S // 60, duree)
+            system(f"🌪 <b>{esc(nom)}</b> reçoit plus de {STORM_MAX} transactions en {STORM_WINDOW_S // 60} min "
+                   f"(bot ou programme) : {duree} pour ne pas épuiser le quota Helius.\n<code>{addr}</code>")
 
         async def on_signature(addr: str, sig: str, err, logs: list | None = None) -> None:
             stats["notifs"] += 1
+            notifs_addr[addr] += 1
+            now = time.time()
+            flot = tempete[addr]
+            flot.append(now)
+            while flot and now - flot[0] > STORM_WINDOW_S:
+                flot.popleft()
+            if len(flot) > STORM_MAX:
+                flot.clear()
+                await couper_tempete(addr)
+                return
             if err is not None:
                 return
-            now = time.time()
             dh = heure[addr]
             dh.append(now)
             while dh and now - dh[0] > 3600:
@@ -235,6 +267,14 @@ async def amain() -> int:
                          "· file %d · RPC temps réel %d / arrière-plan %d · Helius ce mois %d crédits",
                          len(watcher.addresses), stats["notifs"], stats["tx"], stats.get("filtrées", 0),
                          stats["alertes"], queue.qsize(), rpc.calls[0], rpc.calls[1], credits)
+                if notifs_addr:
+                    log.info("Adresses les plus bavardes (15 min) : %s", ", ".join(
+                        f"{pipeline.label(a) or a[:6]} {n}" for a, n in notifs_addr.most_common(3)))
+                    notifs_addr.clear()
+                for a, fin in list(pauses.items()):
+                    if time.time() > fin:
+                        del pauses[a]
+                        await watcher.add(a)   # fin de la pause d'une adresse de la watchlist de départ
                 if tours % 4 == 0:
                     log.info("RPC par méthode depuis le démarrage : %s",
                              ", ".join(f"{m} {n}" for m, n in rpc.by_method.most_common(8)))
