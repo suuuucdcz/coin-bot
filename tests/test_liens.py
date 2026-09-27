@@ -160,7 +160,7 @@ def test_ca_tweete_par_un_autre_compte_n_est_pas_relie(agenda, monkeypatch):
     t = {"handle": "RandomShill", "url": "https://x.com/RandomShill/status/3",
          "text": f"$ASH CA: {MINT} launching today"}
     asyncio.run(a.upsert(t, parse_tweet(t["text"])))
-    assert db.announcement(ann_id)["ca"] is None and "Agenda._candidate" in a.p.spawned
+    assert db.announcement(ann_id)["ca"] is None and any(s.endswith("._candidate") for s in a.p.spawned)
 
 
 def test_details_non_effaces_par_la_fiche_dev(tmp_path):

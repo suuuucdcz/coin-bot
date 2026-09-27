@@ -44,6 +44,9 @@ radar/
   analysis/
     tracer.py        # remontée du funding (hop par hop) + cluster
     classify.py      # scoring / détection des patterns
+  pipeline.py        # cœur : watchlist, confiance, « À ne pas rater », envoi ; evenements.py = un handler par événement
+  agenda*.py         # veille X -> agenda (agenda_candidats, agenda_faux, agenda_affichage, agenda_outils)
+  results.py         # suivi 24 h de chaque alerte (section 📈 Résultats, /resultats)
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ

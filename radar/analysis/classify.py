@@ -198,7 +198,6 @@ def main() -> int:
     import argparse
     import asyncio
     import logging
-    import sys
 
     from .. import config as cfgmod
     from ..pipeline import run_signature_cli

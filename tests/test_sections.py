@@ -1,5 +1,4 @@
 """Sections du groupe : explications épinglées, fiche dev, bandeau arnaques, messages épinglés par section."""
-import asyncio
 
 import pytest
 from conftest import MINT, NEW_WALLET, WATCHED
