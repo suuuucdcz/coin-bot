@@ -24,7 +24,7 @@ Détails : [GUIDE_DEMARRAGE.md](GUIDE_DEMARRAGE.md) · Cahier des charges : [CLA
 
 ## Hébergement gratuit 24 h/24 (serveur Linux)
 
-Oracle Cloud « Always Free » + `bash deploy/installer_serveur.sh` (service système, relance automatique).
+Google Cloud e2-micro « Always Free » + `bash deploy/installer_serveur.sh` (service système, relance automatique).
 Pas à pas, limites et commandes utiles : [HEBERGEMENT.md](HEBERGEMENT.md).
 
 ## Tests

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Installe Memecoin Radar sur un serveur Ubuntu 24.04 (Oracle Cloud Always Free, etc.) et le lance 24 h/24
+# Installe Memecoin Radar sur un serveur Ubuntu 24.04 (Google Cloud e2-micro, Oracle…) et le lance 24 h/24
 # comme service système (redémarrage automatique, comme run.bat sur le PC).
 #
 # Usage, dans le dossier du radar sur le serveur :
 #     bash deploy/installer_serveur.sh          # radar sans IA locale (règles seules pour lire les tweets)
-#     bash deploy/installer_serveur.sh --ia     # + Ollama et le modèle LLM_MODEL du .env (lent sur 2 cœurs ARM)
+#     bash deploy/installer_serveur.sh --ia     # + Ollama et le modèle LLM_MODEL du .env (4 Go de mémoire minimum)
 #
 # Avant : copier .env, data/radar.db et (option) data/session_x_export.json depuis le PC (voir HEBERGEMENT.md).
 set -euo pipefail
@@ -24,6 +24,19 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
     echo "❌ Python 3.11 ou plus est nécessaire : choisis l'image Ubuntu 24.04 pour le serveur."; exit 1; }
 sudo timedatectl set-timezone Europe/Paris || true   # journaux à l'heure de Paris, comme sur le PC
 
+MEM_MO="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+if [ "$MEM_MO" -lt 2048 ] && ! swapon --show | grep -q .; then
+    # Petite machine (e2-micro : 1 Go) : 2 Go de mémoire d'appoint sur le disque, sinon Chromium manque de place
+    echo "   Mémoire : ${MEM_MO} Mo -> ajout de 2 Go de swap"
+    sudo fallocate -l 2G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+    echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-radar.conf >/dev/null
+    sudo sysctl -p /etc/sysctl.d/99-radar.conf >/dev/null
+fi
+
 echo "== 2/6 Environnement Python"
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
@@ -37,6 +50,9 @@ reglage() {  # reglage CLE VALEUR : remplace ou ajoute une ligne du .env
 }
 reglage X_BROWSER chromium
 reglage X_HEADLESS 1
+if [ "$MEM_MO" -lt 2048 ]; then
+    reglage X_LIGHT 1   # ni images ni vidéos : moins de mémoire et moins de trafic sortant (1 Go gratuit/mois)
+fi
 
 echo "== 4/6 Session X"
 if [ -f data/session_x_export.json ]; then
@@ -51,7 +67,10 @@ else
 fi
 
 echo "== 5/6 IA locale"
-if [ "${1:-}" = "--ia" ]; then
+if [ "${1:-}" = "--ia" ] && [ "$MEM_MO" -lt 4000 ]; then
+    echo "   ⚠️ ${MEM_MO} Mo de mémoire : trop peu pour l'IA locale, elle reste désactivée."
+    reglage LLM_ENABLED 0
+elif [ "${1:-}" = "--ia" ]; then
     command -v ollama >/dev/null || curl -fsSL https://ollama.com/install.sh | sh
     MODELE="$(grep '^LLM_MODEL=' .env | cut -d= -f2- || true)"
     ollama pull "${MODELE:-gemma4:e4b}"

@@ -213,9 +213,21 @@ class XWatcher:
         # Edge (signé Microsoft, déjà installé) : le Chromium de Playwright est bloqué par
         # Windows 11 (« spawn UNKNOWN », Smart App Control) sur le PC de Maxence.
         channel = self.cfg.x_browser if self.cfg.x_browser in ("msedge", "chrome") else None
+        args = ["--disable-blink-features=AutomationControlled"]
+        if sys.platform.startswith("linux"):
+            args.append("--disable-dev-shm-usage")   # petits serveurs : /dev/shm trop petit pour Chromium
         ctx = await pw.chromium.launch_persistent_context(
             str(self.cfg.x_profile_dir), channel=channel, headless=headless,
-            viewport={"width": 1280, "height": 900}, args=["--disable-blink-features=AutomationControlled"])
+            viewport={"width": 1280, "height": 900}, args=args)
+        if getattr(self.cfg, "x_light", False):
+            # Serveur à 1 Go (Google Cloud e2-micro) : ni images, ni vidéos, ni polices. Le texte des tweets et
+            # les adresses des images (lues dans la page) restent disponibles ; mémoire et trafic divisés.
+            async def _leger(route):
+                if route.request.resource_type in ("image", "media", "font"):
+                    await route.abort()
+                else:
+                    await route.continue_()
+            await ctx.route("**/*", _leger)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         return ctx, page
 

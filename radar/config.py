@@ -73,6 +73,7 @@ class Config:
     x_poll_seconds: int
     x_headless: bool
     x_browser: str
+    x_light: bool
     x_enabled: bool
     trace_max_hops: int
     hot_wallet_tx_threshold: int
@@ -122,6 +123,7 @@ def load() -> Config:
         x_poll_seconds=_int("X_POLL_SECONDS", 180),
         x_headless=_bool("X_HEADLESS", True),
         x_browser=(_env("X_BROWSER") or "msedge").lower(),
+        x_light=_bool("X_LIGHT", False),
         x_enabled=_bool("X_ENABLED", True),
         trace_max_hops=_int("TRACE_MAX_HOPS", 3),
         hot_wallet_tx_threshold=_int("HOT_WALLET_TX_THRESHOLD", 1000),
