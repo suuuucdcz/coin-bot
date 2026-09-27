@@ -21,6 +21,7 @@ from .agenda import PARIS, Agenda
 from .bot import MENU, Bot
 from .db import DB
 from .pipeline import Pipeline
+from .results import Results
 from .sources import pumpportal
 from .sources.helius import LogsWatcher, RpcError, SolanaRPC, in_background, notable_logs
 from .sources.x_watch import XWatcher, has_session
@@ -105,6 +106,7 @@ async def amain() -> int:
             log.error("Helius ne répond pas correctement au démarrage (%s) : vérifie la clé avec configurer.bat", e)
 
         # Veille X + agenda
+        pipeline.results = Results(db, http)   # suivi de chaque alerte pendant 24 h (📈)
         agenda = Agenda(pipeline, tg)
         xwatcher = None
         if cfg.x_enabled:
@@ -303,6 +305,7 @@ async def amain() -> int:
                        + (" (" + ", ".join(f"{k} {v}" for k, v in sorted(par_type.items())) + ")" if par_type else "")
                        + f"\nNouveaux tokens pump.fun vus : {pumpportal.state['tokens']}"
                        + f"\nVeille X : {'active' if xwatcher else 'inactive (' + cfgmod.AIDE_X + ')'}")
+                tg.enqueue(pipeline.results.report(), kind="resultats", topic="resultats")
 
         async def discovery_loop() -> None:
             await asyncio.sleep(120)  # laisse le radar démarrer
@@ -349,7 +352,8 @@ async def amain() -> int:
         tasks = [watcher.run(), tg.worker(), tg.watch_topics(), heartbeat(), health(), maintenance(),
                  bot.run(), bot.dashboard(),
                  *[worker() for _ in range(WORKERS)], pumpportal.run(on_new_token),
-                 in_background(agenda.refresh_loop()), in_background(agenda.poll_dexscreener())]
+                 in_background(agenda.refresh_loop()), in_background(agenda.poll_dexscreener()),
+                 pipeline.results.loop()]
         if xwatcher:
             tasks.append(in_background(xwatcher.run()))
         if cfg.discovery_enabled:

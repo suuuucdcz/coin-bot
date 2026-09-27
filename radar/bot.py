@@ -209,6 +209,7 @@ class Bot:
             "❌ /retirer &lt;adresse&gt; — ne plus le surveiller\n"
             "🐦 /x &lt;compte&gt; — fiabilité d'un compte X\n"
             "🕸 /reseau &lt;adresse&gt; — toile d'un dev : ses wallets, ses projets, leur sort\n"
+            "📈 /resultats [jours] — ce que sont devenus les tokens alertés (×2, rug…)\n"
             "📋 /watchlist — wallets surveillés\n"
             "🔕 /silence 60 — alertes sans son pendant 60 min (/silence off)\n"
             + A.SEP + "\n"
@@ -261,6 +262,8 @@ class Bot:
             f"👛 Wallets suivis : <b>{len(self.watcher.addresses)}</b> / {self.cfg.watch_max}",
             f"📜 Contrats en attente de lancement : {len(self.p.mints)}",
             f"📨 Transactions analysées : {self.stats.get('tx', 0)}",
+            *[ligne for ligne in (self.tg.latency_line() if hasattr(self.tg, "latency_line") else None,
+                                  self.p.results.short_line() if getattr(self.p, "results", None) else None) if ligne],
             f"🧮 Depuis {datetime.fromtimestamp(self.p.decisions_since, PARIS):%H:%M} : "
             + esc(self.p.decisions_line()),
             f"🚨 Alertes 24 h : <b>{sum(par_type.values())}</b>" + (f" ({top})" if top else ""),
@@ -271,6 +274,11 @@ class Bot:
 
     async def cmd_statut(self, ctx: Ctx, args: list[str]) -> None:
         await ctx.send(self.status_text(), keyboard([("🔄 Actualiser", "c:statut"), ("📋 Watchlist", "c:watchlist")]))
+
+    async def cmd_resultats(self, ctx: Ctx, args: list[str]) -> None:
+        jours = int(args[0]) if args and args[0].isdigit() and 0 < int(args[0]) <= 90 else 7
+        res = getattr(self.p, "results", None)
+        await ctx.send(res.report(jours) if res else "📈 Suivi des résultats non démarré.")
 
     async def cmd_agenda(self, ctx: Ctx, args: list[str]) -> None:
         await ctx.send(self.agenda.render(), keyboard([("🔄 Actualiser", "c:agenda")]))

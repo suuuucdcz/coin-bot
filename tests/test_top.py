@@ -23,7 +23,7 @@ class FakeTG:
         self.sent.append(text)
         return True
 
-    def enqueue_top(self, text, markup=None, key=None):
+    def enqueue_top(self, text, markup=None, key=None, **_kw):
         self.top.append((text, markup, key))
         return True
 

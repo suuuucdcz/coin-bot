@@ -1055,6 +1055,10 @@ class Agenda:
         self._dirty = True
         await self.update_card(ann["id"])
         await self._notify_real(ann, mint, creator)
+        if getattr(self.p, "results", None) is not None:
+            # Suivi 📈 : ce coin annoncé sur X, une fois lancé, a-t-il monté ?
+            self.p.results.record(f"match:{mint}", mint, "annonce", symbol=ann["ticker"],
+                                  grp=f"annonce @{official}" if official else None)
         if ev.level == "fort" and not getattr(self.p, "dry_run", False) and hasattr(self.tg, "enqueue_top"):
             # Coin annoncé sur X ET lien vérifié : candidat « à ne pas rater ». Même contrôle que les alertes
             # on-chain (drapeaux graves, drapeaux de l'annonce, données complètes, âge), plus de chemin à part.

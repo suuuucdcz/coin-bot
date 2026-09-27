@@ -298,7 +298,7 @@ def test_alerte_bloquee_faute_de_donnees_repart_quand_elles_arrivent(pipe, monke
     envoye = []
 
     class TG:
-        def enqueue_top(self, text, markup=None, key=None):
+        def enqueue_top(self, text, markup=None, key=None, **_kw):
             envoye.append(text)
             return True
 

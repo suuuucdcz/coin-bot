@@ -44,7 +44,7 @@ RUG_MARK = "opérateur de rugs en série"
 KIND_TOPIC = {"create": "onchain", "buy": "onchain", "supply_in": "onchain", "lp_add": "onchain", "supply_out": "onchain",
               "sell": "onchain", "transfer": "clusters", "funding": "clusters", "cex": "clusters",
               "trace": "devs", "mute": "clusters", "cluster": "onchain", "discovery": "devs",
-              "system": "system"}
+              "system": "system", "resultats": "resultats"}
 
 
 @dataclass
@@ -59,6 +59,8 @@ class Alert:
     top_why: str = ""
     info: TokenInfo | None = None
     flags: list[str] | None = None
+    wallet: str | None = None       # wallet suivi à l'origine (suivi des résultats : groupe, confiance)
+    event_ts: int | None = None     # heure de l'événement on-chain (mesure du délai jusqu'à Telegram)
 
     @property
     def topic(self) -> str:
@@ -149,6 +151,7 @@ class Pipeline:
         self.cfg, self.db, self.rpc, self.http = cfg, db, rpc, http
         self.tg, self.watcher, self.dry_run = tg, watcher, dry_run
         self.watched: set[str] = set()
+        self.results = None            # suivi des résultats (radar/results.py), branché par main.py
         self.mints: set[str] = set()   # adresses de la watchlist qui sont des contrats de token
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._burst: dict[str, list[float]] = defaultdict(list)
@@ -505,7 +508,7 @@ class Pipeline:
                       top_title=qui if confiance else "", top_why=(self._why(ev.wallet, "achète ce token tout jeune") if len(entries) == 1
                                               else f"{len(entries)} wallets du groupe <b>{esc(grp)}</b> achètent "
                                                    f"ce token tout jeune en moins de {CLUSTER_WINDOW_S // 60} min"),
-                      info=info, flags=flags)
+                      info=info, flags=flags, wallet=ev.wallet, event_ts=ev.ts)
         self.emit(alert)
         if self.on_cluster_entry:
             await self.on_cluster_entry(grp, ev.mint, list(entries), info, alert)
@@ -542,6 +545,9 @@ class Pipeline:
         note = _SKIPPED.set([])
         try:
             alert = await handler(ev)
+            if alert is not None:
+                alert.wallet = alert.wallet or ev.wallet
+                alert.event_ts = alert.event_ts or ev.ts
             if alert is None and not _SKIPPED.get():
                 # Aucune raison notée par le handler : on le dit quand même (journal complet, rien de silencieux)
                 self._skip(f"{ev.kind} sans signal")
@@ -599,7 +605,8 @@ class Pipeline:
             lines.append(f"📌 Contrat suivi : <b>{esc(self.label(ev.mint))}</b>")
         lines += [A.SEP, f"📜 <code>{ev.mint}</code>", "<i>⏳ Analyse en cours : dev, X, market cap…</i>"]
         lines += A.flags_block(flags)
-        return self.emit(Alert(key, kind, "\n".join(lines), A.token_buttons(info, ev.wallet)))
+        return self.emit(Alert(key, kind, "\n".join(lines), A.token_buttons(info, ev.wallet),
+                               wallet=ev.wallet, event_ts=ev.ts))
 
     # 🔴 création
     async def _on_create(self, ev: Event) -> Alert | None:
@@ -973,9 +980,11 @@ class Pipeline:
             log.info("Pas « à ne pas rater » (token de plus de 6 h, plus un lancement) : %s", mint)
             return self._skip("pas « à ne pas rater » : token trop vieux")
         text = A.top_card(alert.info, alert.top_title, alert.top_why, list(alert.flags or []) + annonce)
-        if self.tg.enqueue_top(text, A.top_buttons(alert.info, getattr(self.cfg, "trade_url", "")),
-                               key=f"top:{alert.kind}:{alert.info.mint}"):
+        cle = f"top:{alert.kind}:{alert.info.mint}"
+        if self.tg.enqueue_top(text, A.top_buttons(alert.info, getattr(self.cfg, "trade_url", "")), key=cle,
+                               event_ts=alert.event_ts):
             log.info("🎯 À ne pas rater : %s %s", alert.kind, alert.info.mint)
+            self._track(alert, key=cle, kind="top")
 
     def _announcement_flags(self, mint: str) -> list[str]:
         ann = self.db.find_announcement(None, mint, 0)
@@ -1008,6 +1017,14 @@ class Pipeline:
             vu.append(raison)
         return None
 
+    def _track(self, alert: Alert, key: str | None = None, kind: str | None = None) -> None:
+        """Suivi des résultats (radar/results.py) : l'alerte est mesurée pendant 24 h."""
+        if self.results is None or alert.info is None:
+            return
+        w = alert.wallet
+        self.results.record(key or alert.key, alert.info.mint, kind or alert.kind, alert.info.mc_usd,
+                            alert.info.symbol, self.group(w) if w else None, self.trust(w) if w else None)
+
     def emit(self, alert: Alert) -> bool:
         self._emit_top(alert)
         if alert.topic == "scams" and not alert.text.startswith("🏴‍☠️"):
@@ -1017,9 +1034,12 @@ class Pipeline:
             if alert.replace:
                 self._spawn(self.tg.replace(alert.key, alert.text, alert.markup, alert.topic), urgent=True)
                 log.info("Alerte %s complétée : %s", alert.kind, alert.key)
+                self._track(alert)
                 return True
-            if self.tg.enqueue(alert.text, alert.markup, alert.key, alert.kind, topic=alert.topic):
+            if self.tg.enqueue(alert.text, alert.markup, alert.key, alert.kind, topic=alert.topic,
+                               event_ts=alert.event_ts):
                 log.info("Alerte %s -> %s : %s", alert.kind, alert.topic, alert.key)
+                self._track(alert)
                 self.decisions[f"alerte {alert.kind}"] += 1
                 vu = _SKIPPED.get()
                 if vu is not None:

@@ -17,7 +17,7 @@ import logging
 import re
 import sys
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import aiohttp
 
@@ -28,6 +28,7 @@ log = logging.getLogger("telegram")
 
 API = "https://api.telegram.org/bot{token}/{method}"
 MIN_INTERVAL = 1.1  # secondes entre deux messages
+LATENCY_MAX_S = 300  # au-delà : rattrapage après une coupure, pas compté dans le délai habituel
 SEND_RETRIES = 3    # nouveaux essais (espacés de RETRY_DELAY) si Telegram est injoignable
 RETRY_DELAY = 30
 
@@ -41,6 +42,7 @@ TOPICS = {
     "devs":     ("🧠", "Devs & satellites", 13338331),
     "scams":    ("🏴‍☠️", "Arnaques repérées", 16749490),
     "fakes":    ("🎭", "Faux coins du jour", 9367192),
+    "resultats": ("📈", "Résultats des alertes", 9367192),
     "system":   ("🤖", "État du radar", 7322096),
 }
 # Ce que contient chaque section (épinglé en tête de la section, ou en bas de son message épinglé)
@@ -77,13 +79,16 @@ SECTION_INFO = {
                "👑 = compte officiel probable, 🟢🟡🔴 = fiabilité du compte.</i>"),
     "fakes": ("<i>Section 🎭 : copies d'un coin annoncé (bougie puis rug). Si une copie est reliée au dev, "
               "ses wallets sont suivis pour attraper le vrai lancement.</i>"),
+    "resultats": ("<i>Section 📈 : ce que sont devenus les tokens alertés. Chaque alerte est suivie 24 h "
+                  "(market cap au moment de l'alerte, plus haut atteint, valeur à +24 h) ; bilan chaque matin. "
+                  "Sert à savoir quelles alertes valent le coup. /resultats à tout moment.</i>"),
     "system": ("<i>Section 🤖 : santé du radar. Coupures, clé Helius, session X, reclassements automatiques "
                "(fermes de bots, snipers), bilan chaque matin à 9 h.</i>"),
 }
 HEADER_VERSION = "1"
 
 # Alertes secondaires : envoyées sans son (les importantes gardent la notification)
-QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes"}
+QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes", "resultats"}
 
 BOT_COMMANDS = [
     ("statut", "État du radar : sources, wallets suivis, alertes"),
@@ -95,6 +100,7 @@ BOT_COMMANDS = [
     ("retirer", "Arrêter de surveiller : /retirer <adresse>"),
     ("x", "Fiabilité d'un compte X : /x <compte>"),
     ("reseau", "Toile d'un dev : ses wallets, ses projets, leur sort : /reseau <adresse>"),
+    ("resultats", "Ce que sont devenus les tokens alertés (×2, rug…) sur 7 jours"),
     ("watchlist", "Wallets surveillés, par groupe"),
     ("silence", "Alertes sans son : /silence 60 ou /silence off"),
     ("aide", "Toutes les commandes"),
@@ -106,7 +112,7 @@ BOT_DESCRIPTION = (
     "sur X et vérifie les liens (vrai compte, faux coins, rugs).\n\n"
     "Alerte uniquement : aucune clé privée, aucun trading.\n\nTape /aide pour les commandes."
 )
-PROFILE_VERSION = "4"
+PROFILE_VERSION = "5"
 
 
 def esc(text: object) -> str:
@@ -179,6 +185,8 @@ class Telegram:
         self._lock = asyncio.Lock()
         # clé d'alerte -> identifiant du message envoyé (pour compléter une alerte rapide)
         self._sent: OrderedDict[str, asyncio.Future] = OrderedDict()
+        self._event_ts: dict[str, tuple[float, str]] = {}     # clé -> heure de l'événement on-chain
+        self.latencies: deque[tuple[float, str, float]] = deque(maxlen=300)   # (délai, type, heure d'envoi)
         self._icons: dict[str, str] | None = None
         # Conversation « 🎯 À ne pas rater » (en privé avec le bot) : seules les alertes vérifiées, avec le son.
         # Quand elle existe, le groupe (tout le détail) passe en silencieux.
@@ -491,12 +499,15 @@ class Telegram:
             log.warning("Épinglage impossible (le bot doit être admin) : %s", e)
 
     def enqueue(self, text: str, reply_markup: dict | None = None, key: str | None = None, kind: str = "",
-                topic: str | None = None, reply_to: int | None = None, on_sent=None) -> bool:
-        """Met une alerte en file. Renvoie False si elle a déjà été envoyée (clé connue)."""
+                topic: str | None = None, reply_to: int | None = None, on_sent=None,
+                event_ts: float | None = None) -> bool:
+        """Met une alerte en file. Renvoie False si elle a déjà été envoyée (clé connue).
+        event_ts : heure de l'événement on-chain, pour mesurer le délai jusqu'à l'envoi."""
         if key and self.db and self.db.alert_already_sent(key):
             return False
         if key and self.db:
             self.db.mark_alert_sent(key, kind)
+        self._note_event(key, event_ts, kind)
         if key:
             self._sent[key] = asyncio.get_running_loop().create_future()
             while len(self._sent) > 500:
@@ -504,14 +515,32 @@ class Telegram:
         self.queue.put_nowait((text, reply_markup, topic, reply_to, on_sent, key, 0, kind in QUIET_KINDS))
         return True
 
-    def enqueue_top(self, text: str, reply_markup: dict | None = None, key: str | None = None) -> bool:
+    def enqueue_top(self, text: str, reply_markup: dict | None = None, key: str | None = None,
+                    event_ts: float | None = None) -> bool:
         """Alerte « 🎯 À ne pas rater » : conversation privée avec le bot (ou sujet ‼️ du groupe), avec le son."""
         if key and self.db and self.db.alert_already_sent(key):
             return False
         if key and self.db:
             self.db.mark_alert_sent(key, "top")
-        self.queue.put_nowait((text, reply_markup, "__top__", None, None, None, 0, False))
+        self._note_event(key, event_ts, "top")
+        self.queue.put_nowait((text, reply_markup, "__top__", None, None, key, 0, False))
         return True
+
+    def _note_event(self, key: str | None, event_ts: float | None, kind: str) -> None:
+        if key and event_ts:
+            self._event_ts[key] = (float(event_ts), kind)
+            while len(self._event_ts) > 500:
+                self._event_ts.pop(next(iter(self._event_ts)))
+
+    def latency_line(self) -> str | None:
+        """« ⚡ Délai événement → Telegram : médiane 4 s · 9 alertes sur 10 en moins de 11 s »."""
+        now = time.time()
+        vals = sorted(d for d, _k, t in self.latencies if now - t < 86400 and d <= LATENCY_MAX_S)
+        if not vals:
+            return None
+        med, p90 = vals[len(vals) // 2], vals[min(len(vals) - 1, int(len(vals) * 0.9))]
+        return (f"⚡ Délai événement on-chain → Telegram (24 h) : médiane <b>{med:.0f} s</b> · "
+                f"9 sur 10 en moins de {p90:.0f} s ({len(vals)} alertes)")
 
     async def post_guide(self, text: str, version: str) -> None:
         """Mode d'emploi épinglé dans la conversation « À ne pas rater » (une fois par version)."""
@@ -556,6 +585,9 @@ class Telegram:
                     res = await self.send_now(text, markup, topic, reply_to, quiet=quiet)
                 mid = res["result"]["message_id"]
                 self.sent_count += 1
+                ev = self._event_ts.pop(key, None) if key else None
+                if ev:
+                    self.latencies.append((time.time() - ev[0], ev[1], time.time()))
                 if key:
                     self.last_alert_ts = time.time()
                 if key and key in self._sent and not self._sent[key].done():

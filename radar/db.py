@@ -92,6 +92,23 @@ CREATE TABLE IF NOT EXISTS x_accounts (
     data       TEXT,                  -- JSON : abonnés, date de création, certifié
     checked_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS results (   -- suivi des alertes sur 24 h (radar/results.py)
+    key        TEXT PRIMARY KEY,      -- clé de l'alerte suivie
+    mint       TEXT NOT NULL,
+    symbol     TEXT,
+    kind       TEXT,                  -- create, buy, cluster, lp_add, top, annonce…
+    grp        TEXT,
+    trust      TEXT,
+    sent_at    INTEGER,
+    mc0        REAL,                  -- market cap au moment de l'alerte (ou 1re mesure)
+    mc_max     REAL,                  -- plus haut vu ensuite
+    mc_1h      REAL,
+    mc_24h     REAL,
+    last_mc    REAL,
+    last_check INTEGER,
+    done       INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS results_open ON results(done, sent_at);
 """
 
 
@@ -285,6 +302,35 @@ class DB:
     def get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
+
+    # --- suivi des résultats -----------------------------------------------------
+    def add_result(self, key: str, mint: str, kind: str, symbol: str | None, grp: str | None, trust: str | None,
+                   mc0: float | None, sent_at: int | None = None) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO results(key,mint,symbol,kind,grp,trust,sent_at,mc0) VALUES(?,?,?,?,?,?,?,?)",
+            (key, mint, symbol, kind, grp, trust, int(sent_at or time.time()), mc0 if mc0 and mc0 > 0 else None))
+        self.conn.commit()
+
+    def results_open(self, since: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM results WHERE done=0 AND sent_at>=?", (since,)).fetchall()
+
+    def update_result(self, key: str, mc: float | None, peak: float | None, now: int) -> None:
+        """Nouvelle mesure : plus haut, valeur à +1 h (1re mesure après 1 h), à +24 h (et fin du suivi)."""
+        r = self.conn.execute("SELECT * FROM results WHERE key=?", (key,)).fetchone()
+        if r is None:
+            return
+        age = now - (r["sent_at"] or now)
+        haut = max(x for x in (r["mc_max"] or 0, mc or 0, peak or 0))
+        mc0 = r["mc0"] or mc
+        self.conn.execute(
+            "UPDATE results SET mc0=?, mc_max=?, last_mc=COALESCE(?, last_mc), last_check=?, "
+            "mc_1h=CASE WHEN mc_1h IS NULL AND ?>=3600 THEN ? ELSE mc_1h END, "
+            "mc_24h=CASE WHEN ?>=86400 THEN ? ELSE mc_24h END, done=CASE WHEN ?>=86400 THEN 1 ELSE 0 END WHERE key=?",
+            (mc0, haut or None, mc, now, age, mc, age, mc, age, key))
+        self.conn.commit()
+
+    def results_since(self, since: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM results WHERE sent_at>=? ORDER BY sent_at", (since,)).fetchall()
 
     def settings_like(self, prefix: str) -> list[tuple[str, str]]:
         """Réglages dont la clé commence par ce préfixe (ex. « noisy: »)."""
