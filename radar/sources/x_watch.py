@@ -222,9 +222,9 @@ class XWatcher:
             args += ["--disable-gpu", "--renderer-process-limit=1", "--disable-extensions",
                      "--disable-background-networking", "--disable-features=site-per-process,IsolateOrigins,"
                      "Translate,MediaRouter,OptimizationHints"]
+        taille = {"width": 1024, "height": 768} if getattr(self.cfg, "x_light", False) else {"width": 1280, "height": 900}
         ctx = await pw.chromium.launch_persistent_context(
-            str(self.cfg.x_profile_dir), channel=channel, headless=headless,
-            viewport={"width": 1280, "height": 900}, args=args)
+            str(self.cfg.x_profile_dir), channel=channel, headless=headless, viewport=taille, args=args)
         if getattr(self.cfg, "x_light", False):
             # Serveur à 1 Go (Google Cloud e2-micro) : ni images, ni vidéos, ni polices. Le texte des tweets et
             # les adresses des images (lues dans la page) restent disponibles ; mémoire et trafic divisés.
@@ -253,9 +253,20 @@ class XWatcher:
                                                     + random.uniform(0, 900))
                             await self.cycle(page)
                             pause = self.cfg.x_poll_seconds * random.uniform(0.8, 1.5)
-                            await asyncio.sleep(pause)
+                            if getattr(self.cfg, "x_light", False):
+                                # Petit serveur : navigateur fermé pendant la pause (~400 Mo rendus au système).
+                                # Vu en vrai sur 1 Go : swap sur disque lent, radar figé, PumpPortal et Telegram
+                                # coupés toutes les 5 min.
+                                await ctx.close()
+                                await asyncio.sleep(pause)
+                                ctx, page = await self._open(pw, self.cfg.x_headless)
+                            else:
+                                await asyncio.sleep(pause)
                     finally:
-                        await ctx.close()
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
             except asyncio.CancelledError:
                 raise
             except Exception as e:

@@ -36,6 +36,27 @@ if [ "$MEM_MO" -lt 2048 ] && ! swapon --show | grep -q .; then
     echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-radar.conf >/dev/null
     sudo sysctl -p /etc/sysctl.d/99-radar.conf >/dev/null
 fi
+if [ "$MEM_MO" -lt 2048 ] && [ ! -f /etc/systemd/system/zram-radar.service ]; then
+    # Swap COMPRESSÉ EN MÉMOIRE (zram), utilisé avant le swap disque. Vu en vrai sur e2-micro : le swap sur
+    # disque standard (très lent) figeait le radar ; PumpPortal et Telegram décrochaient toutes les 5 min.
+    echo "   Ajout d'un swap compressé en mémoire (zram, lz4)"
+    sudo tee /etc/systemd/system/zram-radar.service >/dev/null <<'ZRAM'
+[Unit]
+Description=Swap compresse en memoire (zram) pour Memecoin Radar
+Before=memecoin-radar.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'modprobe zram && zramctl /dev/zram0 --algorithm lz4 --size 768M && mkswap /dev/zram0 && swapon -p 100 /dev/zram0'
+ExecStop=/bin/sh -c 'swapoff /dev/zram0; zramctl --reset /dev/zram0'
+
+[Install]
+WantedBy=multi-user.target
+ZRAM
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now zram-radar
+fi
 
 echo "== 2/6 Environnement Python"
 python3 -m venv .venv
