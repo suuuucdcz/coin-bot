@@ -74,8 +74,10 @@ TWEET_SCHEMA = {
 TWEET_PROMPT = """Classify this tweet about a crypto token and extract what is written (text and images).
 
 type:
-- "annonce_projet": the token's own team announces its launch, launch time or contract ("we", "our", official account)
-- "promo_tiers": someone else (caller, influencer, group, bot) promotes or reposts a token that is not theirs
+- "annonce_projet": the token's own team announces an UPCOMING launch, its launch time or its contract ("we", "our",
+  official account). A token that ALREADY launched ("launched a day ago", "is live since") is not an upcoming launch.
+- "promo_tiers": someone else (caller, influencer, group, bot) promotes, explains or reposts a token that is not theirs:
+  the author speaks ABOUT the project ("I decided to explain", "I bought", "the team", "they") instead of for it
 - "arnaque": the tweet asks readers to SEND crypto, give a wallet/seed, pay a presale, join a giveaway/airdrop to
   receive tokens, or gives the contract only in DM/Telegram. A caller bragging about past gains ("you would have
   made $500k with my call") is "promo_tiers", NOT "arnaque".
