@@ -116,7 +116,9 @@ async def candidates(http, min_ath: float) -> list[dict]:
     return sorted(ok, key=lambda c: c.get("ath") or 0, reverse=True)
 
 
-async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
+async def evaluate(pipeline, coin: dict, min_ath: float, ignorer: frozenset[str] = frozenset()) -> Found:
+    """`ignorer` : wallets dont le groupe actuel ne compte pas comme preuve (le dev réévalué et son bank : sinon un
+    ancien classement se confirme lui-même ; vu en vrai : $YAP « lié au cluster via » son propre wallet)."""
     creator = coin["creator"]
     history = await pumpfun.coins_by_creator(pipeline.http, creator) or []
     hits = sum(1 for c in history if (c.get("ath") or 0) >= min_ath / 2)
@@ -166,6 +168,8 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
             if amont:
                 chaine.append(amont["source"])
             for a in chaine:
+                if a in ignorer:
+                    continue
                 grp = pipeline.group(a)
                 if grp and grp in pipeline.cfg.rug_groups:
                     f.rug_group = grp
@@ -284,7 +288,8 @@ async def revalider(pipeline) -> list[str]:
         "SELECT * FROM wallets WHERE (grp = ? AND role LIKE 'dev (découverte%' AND role NOT LIKE '%vérifiée DexScreener%')"
         # reclassés sur une seule règle faible, revue le 28/09 (relais seuls, « 1 projet raté »)
         " OR role LIKE 'dev reclassé : financement brouillé : chaîne de relais%'"
-        " OR role LIKE 'dev reclassé : réseau à rugs : 1/%'", (GROUP,)).fetchall()
+        " OR role LIKE 'dev reclassé : réseau à rugs : 1/%'"
+        " OR role LIKE 'dev reclassé : lié au cluster%'", (GROUP,)).fetchall()
     for w in anciens:
         coins = await pumpfun.coins_by_creator(pipeline.http, w["address"]) or []
         coin = max(coins, key=lambda c: c.get("ath") or 0, default=None)
@@ -292,7 +297,11 @@ async def revalider(pipeline) -> list[str]:
             continue
         sym = (coin.get("symbol") or "?")[:10]
         marche = (await dexscreener.markets(pipeline.http, [coin["mint"]])).get(coin["mint"])
-        f = await evaluate(pipeline, {**coin, "creator": w["address"]}, cfg.discovery_min_ath)
+        banks = [r["address"] for r in db.conn.execute(
+            "SELECT address FROM wallets WHERE parent = ? AND (role LIKE 'bank probable%' OR role LIKE 'financeur lié%')",
+            (w["address"],))]
+        f = await evaluate(pipeline, {**coin, "creator": w["address"]}, cfg.discovery_min_ath,
+                           frozenset([w["address"], *banks]))
         faux = f.reason or (suspect_market(marche, cfg.discovery_min_ath) if marche else "plus de marché")
         if f.rug_group:
             grp, role = f.rug_group, f"dev reclassé : {f.reason.removeprefix('⛔ ')}"
@@ -301,7 +310,10 @@ async def revalider(pipeline) -> list[str]:
         else:
             grp, role = GROUP, f"dev (découverte : ${sym}, MC {A.usd(marche['mc'])} vérifiée DexScreener)"
         db.set_wallet_role(w["address"], w["label"], grp, role, w["depth"])
-        lignes.append(f"{w['label']} -> {grp} : {role}")
+        # Le bank du dev suit son classement (il avait été classé à cause du dev, ou avant la revérification)
+        db.conn.executemany("UPDATE wallets SET grp = ? WHERE address = ?", [(grp, b) for b in banks])
+        db.conn.commit()
+        lignes.append(f"{w['label']} -> {grp} : {role}" + (f" (+ {len(banks)} bank)" if banks else ""))
     return lignes
 
 

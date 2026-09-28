@@ -191,7 +191,8 @@ def test_anciennes_decouvertes_non_verifiees_revalidees(tmp_path, monkeypatch):
                  "mYAP": {"mc": 2_300, "liquidity": 1_800, "txns24h": 12}}
         return {m: vrais[m] for m in mints if m in vrais}
 
-    async def evaluate(pipeline, coin, min_ath):
+    async def evaluate(pipeline, coin, min_ath, ignorer=frozenset()):
+        assert coin["creator"] in ignorer          # le dev réévalué ne sert jamais de preuve contre lui-même
         f = discovery.Found(coin["creator"], coin["symbol"], coin["mint"], coin["ath"], 3, 1)
         if coin["symbol"] == "AROS":
             f.rug_group, f.reason = "reseau-rugs", "⛔ réseau à rugs : 5/6 projets du dev et de ses wallets rug (−99 %)"
@@ -259,4 +260,46 @@ def test_chaine_de_relais_seule_ne_classe_pas_sans_ferme(tmp_path, monkeypatch):
         assert f.rug_group == attendu
         if not ferme_ou_pas:
             assert f.funder_note.startswith("🟠 financement brouillé") and not f.reason
+    db.close()
+
+
+def test_revalidation_sans_preuve_circulaire(tmp_path, monkeypatch):
+    # Vu en vrai : $YAP réévalué restait ⛔ « lié au cluster via A8GP » = son propre wallet (ancien classement)
+    from radar import discovery
+    db = DB(tmp_path / "r.db")
+    p = Pipeline(cfgmod.load(), db, rpc=None, http=object(), tg=None)
+    dev, bank = "A8GPdevyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "4J87bankbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    db.add_wallet(dev, "DEV_YAP_A8GP", "reserve-suspect", "dev reclassé : financement brouillé : chaîne de relais au "
+                  "même montant (3.36104 SOL → 3.36106 SOL)", 0, None)
+    db.add_wallet(bank, "BANK_YAP_4J87", "reserve-suspect", "bank probable (a financé le dev de $YAP)", 1, dev)
+
+    async def coins_by_creator(http, a):
+        return [{"mint": "mYAP", "symbol": "YAP", "ath": 5.7e6, "created": int(NOW) - 3 * 86400}]
+
+    async def markets(http, mints):
+        return {"mYAP": {"mc": 1_800_000, "liquidity": 180_000, "txns24h": 2_500}}
+
+    async def quick(pipeline, creator):
+        return network.Report(creator)
+
+    async def financement(self, address):
+        return ({"source": bank, "amount": 3.36104, "signature": "s", "ts": int(NOW)} if address == dev else None), 3, ""
+
+    async def pas_exchange(self, source, sig):
+        return False, ""
+
+    async def pas_de_ferme(pipeline, mint, creator):
+        return False
+
+    monkeypatch.setattr(discovery.pumpfun, "coins_by_creator", coins_by_creator)
+    monkeypatch.setattr(discovery.dexscreener, "markets", markets)
+    monkeypatch.setattr(network, "quick", quick)
+    monkeypatch.setattr(network, "quick_verdict", lambda rep: network.RELAIS_FLAG + " au même montant")
+    monkeypatch.setattr(discovery.Tracer, "first_funding", financement)
+    monkeypatch.setattr(discovery.Tracer, "hot_check", pas_exchange)
+    monkeypatch.setattr(discovery, "_ferme", pas_de_ferme)
+    lignes = asyncio.run(discovery.revalider(p))
+    assert lignes and "+ 1 bank" in lignes[0]
+    assert db.wallet(dev)["grp"] == "découverte" and "1.8 M$ vérifiée DexScreener" in db.wallet(dev)["role"]
+    assert db.wallet(bank)["grp"] == "découverte"
     db.close()
