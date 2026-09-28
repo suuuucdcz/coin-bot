@@ -51,6 +51,8 @@ class TokenInfo:
     curve_sol: float | None = None   # SOL réellement déposés par des acheteurs dans la bonding curve
     top10_pct: float | None = None   # part des 10 plus gros détenteurs (hors bonding curve / pool)
     dev_pct: float | None = None     # part encore détenue par le créateur
+    farm_n: int | None = None        # gros détenteurs aux parts quasi identiques (ferme d'un opérateur)
+    farm_pct: float | None = None    # part de la supply qu'ils tiennent ensemble
     pumpfun_ok: bool = False         # fiche pump.fun obtenue
     network: str | None = None       # résumé du réseau du dev (radar/analysis/network.py)
 
@@ -91,14 +93,33 @@ FACTORY_MIN_24H = 3        # 3 tokens ou plus créés par le même wallet en 24 
 SERIAL_MAX_ATH = 50_000
 
 
+# Ferme de wallets : au moins 8 gros détenteurs aux parts quasi identiques (±10 %). Vu en vrai (28/09) : les faux
+# fonds du réseau Reserve (WSOS, WOTF, AROS, x7 : 10 × 0,99 %, wallets financés avec 0,009995 SOL, le même robot
+# dans le top de 3 tokens) et des devs « à succès » (WEPE, Nasduck : 10 wallets financés par le bank du dev) ; les
+# coins au marché organique (JEANPHIL, COLLECT, YAP) ont des parts inégales.
+FERME_MIN = 8
+FERME_ECART = 0.10
 TOP10_MAX_PCT = 35
 DEV_MAX_PCT = 10
 CURVE_MIN_SOL = 2.0
 BUNDLE_ATH_S = 15
 
 
-async def holders(rpc: SolanaRPC, mint: str, supply_raw: int, creator: str | None) -> tuple[float, float] | None:
-    """(part des 10 plus gros détenteurs, part du créateur), hors comptes de programmes (bonding curve, pool)."""
+def ferme(parts: dict[str, float], exclure: str | None = None) -> tuple[int, float]:
+    """(nombre, part totale) du plus grand groupe de gros détenteurs aux parts quasi identiques (top 20, ≥ 0,1 %)."""
+    vals = sorted((p for o, p in parts.items() if o != exclure and p >= 0.1), reverse=True)[:20]
+    best = (0, 0.0)
+    for v in vals:
+        groupe = [x for x in vals if abs(x - v) <= FERME_ECART * v]
+        if len(groupe) > best[0]:
+            best = (len(groupe), round(sum(groupe), 1))
+    return best
+
+
+async def holders(rpc: SolanaRPC, mint: str, supply_raw: int, creator: str | None) \
+        -> tuple[float, float, int, float] | None:
+    """(part des 10 plus gros détenteurs, part du créateur, ferme : nombre, part), hors comptes de programmes
+    (bonding curve, pool)."""
     comptes = await rpc.token_largest_accounts(mint)
     if not comptes:
         return None
@@ -120,7 +141,8 @@ async def holders(rpc: SolanaRPC, mint: str, supply_raw: int, creator: str | Non
         if v is None or v.get("owner") == SYSTEM:   # wallet normal (pas une bonding curve ni un pool)
             humains[o] = par_proprio[o]
     top10 = sum(sorted(humains.values(), reverse=True)[:10])
-    return round(top10, 1), round(humains.get(creator or "", 0.0), 1)
+    n, pct = ferme(humains, creator)
+    return round(top10, 1), round(humains.get(creator or "", 0.0), 1), n, pct
 
 
 def _rug_flags(info: TokenInfo) -> None:
@@ -133,6 +155,9 @@ def _rug_flags(info: TokenInfo) -> None:
         add(f"top 10 des détenteurs = {info.top10_pct:.0f} % de la supply (hors bonding curve) : risque de dump")
     if info.dev_pct is not None and info.dev_pct >= DEV_MAX_PCT:
         add(f"le dev détient encore {info.dev_pct:.0f} % de la supply")
+    if info.farm_n is not None and info.farm_n >= FERME_MIN:
+        add(f"🧱 ferme de wallets : {info.farm_n} gros détenteurs aux parts quasi identiques ({info.farm_pct:.0f} % "
+            "des tokens) : supply tenue par un seul opérateur, prix facile à pousser puis à vider")
     if info.ath_usd and info.mc_usd and info.mc_usd < 0.5 * info.ath_usd and info.created_ts:
         if info.ath_ts and info.ath_ts - info.created_ts <= BUNDLE_ATH_S:
             add(f"ATH atteint {max(0, info.ath_ts - info.created_ts)} s après la création puis −"
@@ -234,7 +259,7 @@ async def token_info(rpc: SolanaRPC, http: aiohttp.ClientSession, mint: str, cre
             except Exception:
                 res = None
             if res:
-                info.top10_pct, info.dev_pct = res
+                info.top10_pct, info.dev_pct, info.farm_n, info.farm_pct = res
                 _rug_flags(info)
         return info
     info = TokenInfo(mint)
@@ -316,7 +341,7 @@ async def token_info(rpc: SolanaRPC, http: aiohttp.ClientSession, mint: str, cre
     if with_dev_history and info.supply_raw:
         res = await safe(holders(rpc, mint, info.supply_raw, info.creator))
         if res:
-            info.top10_pct, info.dev_pct = res
+            info.top10_pct, info.dev_pct, info.farm_n, info.farm_pct = res
 
     # Drapeaux rouges
     _dev_flags(info)

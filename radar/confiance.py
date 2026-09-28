@@ -35,10 +35,12 @@ def wallet_trust(row, parent_trust: str | None = None, bad_groups: set[str] | fr
         return "faible"
     if row["depth"] == 0 and row["grp"] != "découverte":
         return "référence"
-    if r.startswith("dev (découverte"):
+    if r.startswith("dev (découverte") and "vérifiée dexscreener" in r:
+        # Seulement un succès vérifié sur un vrai marché. Vu en vrai : 19 devs du réseau Reserve, ajoutés par une
+        # ancienne version sur des ATH absurdes de pump.fun (AROS « 482 M$ »), gardaient « prouvé ».
         return "prouvé"
     if r.startswith("bank à succès (toile"):
-        return "prouvé"   # mesuré par la toile : au moins 2 créateurs neufs financés encore à 50 k$ après 24 h
+        return "prouvé"   # mesuré par la toile : au moins 2 créateurs neufs financés encore à 50 k$ à 24 h et 72 h
     if r.startswith("dev probable") and "renvoie vers" in r:
         return "prouvé"   # CA publié par le compte officiel ET le token renvoie vers lui
     if r.startswith("dev probable") and "adresse publiée par" in r:

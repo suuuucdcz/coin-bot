@@ -274,12 +274,20 @@ def test_le_dev_deplace_sa_supply(pipe, monkeypatch):
 
     monkeypatch.setattr(p, "_info", info)
     p.rpc = RPC()
+    db.upsert_token(MINT, "PAID", "Paid", WATCHED, int(time.time()) - 600)   # token suivi (créé par un dev suivi)
     ev = Event("supply_out", WATCHED, "s", int(time.time()), MINT, tokens_raw=50_000_000, pre_tokens_raw=200_000_000,
                other=NEW_WALLET)
     alerte = asyncio.run(p._on_supply_out(ev))
     assert "LE DEV DÉPLACE SA SUPPLY" in alerte.text and "5.0 %" in alerte.text and db.wallet(NEW_WALLET)
     petit = Event("supply_out", WATCHED, "s2", int(time.time()), MINT, tokens_raw=1_000, pre_tokens_raw=2_000, other=BANK)
     assert asyncio.run(p._on_supply_out(petit)) is None and "trop petit" in p.decisions_line()
+    # Vu en vrai : un wallet d'un réseau à rugs déplaçait la supply d'un token de 44 jours ($SEAL) -> alerte inutile
+    vieux = "SEALvieuxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"
+    db.upsert_token(vieux, "SEAL", "Seal", WATCHED, int(time.time()) - 44 * 86400)
+    for mint, raison in ((vieux, "plus de 7 jours"), ("INCONNUxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "non suivi")):
+        ev = Event("supply_out", WATCHED, "s3", int(time.time()), mint, tokens_raw=50_000_000,
+                   pre_tokens_raw=200_000_000, other=NEW_WALLET)
+        assert asyncio.run(p._on_supply_out(ev)) is None and raison in p.decisions_line()
 
 
 def test_contrat_lance_plus_jamais_en_attente(pipe):
@@ -319,3 +327,30 @@ def test_alerte_bloquee_faute_de_donnees_repart_quand_elles_arrivent(pipe, monke
 
     asyncio.run(go())
     assert envoye and "TRADING OUVERT" in envoye[0] and "données complètes" in envoye[0]
+
+
+def test_le_dump_du_dev_est_alerte_apres_une_premiere_petite_vente(pipe, monkeypatch):
+    # Vu en vrai (28/09, $MrBeast, $INSTA, $Claude) : le dev vend un peu 1 à 7 min après la création (alertée),
+    # puis vide tout au sommet ~2 h plus tard (166 à 226 k$, −99 % en 15 min). Ce dump n'était pas alerté.
+    p, db = pipe
+    db.add_wallet(WATCHED, "NEW_3Yah", "reserve-cluster", "financé par SAT_A8Ej", 1, None)
+    p.reload_watchlist()
+    db.upsert_token(MINT, "MrBeast", "MrBeast", WATCHED, int(time.time()) - 600)
+
+    async def info(mint, creator_hint=None, dev=True):
+        return TokenInfo(mint, symbol="MrBeast", creator=WATCHED, supply_raw=1_000_000_000, mc_usd=5_000_000)
+
+    monkeypatch.setattr(p, "_info", info)
+
+    def vente(sig, sol):
+        return asyncio.run(p._on_sell(Event("sell", WATCHED, sig, int(time.time()), MINT, sol=sol,
+                                             tokens_raw=10_000_000, pre_tokens_raw=300_000_000)))
+
+    premiere = vente("s1", 1.2)
+    assert "LE DEV VEND" in premiere.text
+    p.db.mark_alert_sent(premiere.key, "sell")
+    assert vente("s2", 3.0) is None                      # petite revente : pas de nouvelle alerte
+    dump = vente("s3", 1_050.0)
+    assert "🚨" in dump.text and "LE DEV VIDE SA POSITION" in dump.text and "1050.00 SOL" in dump.text
+    p.db.mark_alert_sent(dump.key, "sell")
+    assert vente("s4", 900.0) is None                    # une seule alerte par tranche de 10 min

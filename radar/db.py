@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS toile_tokens (    -- tokens pump.fun créés par les 
     creator TEXT,
     symbol  TEXT,
     ts      INTEGER,
-    mc_24h  REAL           -- market cap 24 h après la création (NULL = pas encore mesurée)
+    mc_24h  REAL,          -- market cap 24 h après la création (NULL = pas encore mesurée)
+    mc_72h  REAL           -- 72 h après (seulement si ≥ 50 k$ à 24 h ; sinon = mc_24h, échec définitif)
 );
 CREATE INDEX IF NOT EXISTS toile_createur ON toile_tokens(creator);
 CREATE INDEX IF NOT EXISTS toile_a_mesurer ON toile_tokens(ts) WHERE mc_24h IS NULL;
@@ -152,11 +153,14 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         # Colonnes ajoutées après coup (bases déjà créées)
-        for ddl in ("ALTER TABLE announcements ADD COLUMN details TEXT", "ALTER TABLE results ADD COLUMN check5 TEXT"):
+        for ddl in ("ALTER TABLE announcements ADD COLUMN details TEXT", "ALTER TABLE results ADD COLUMN check5 TEXT",
+                    "ALTER TABLE toile_tokens ADD COLUMN mc_72h REAL"):
             try:
                 self.conn.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        self.conn.execute("CREATE INDEX IF NOT EXISTS toile_a_remesurer ON toile_tokens(ts) "
+                          "WHERE mc_72h IS NULL AND mc_24h IS NOT NULL")
         self.conn.commit()
 
     # --- wallets -----------------------------------------------------------
@@ -400,16 +404,27 @@ class DB:
         return self.conn.execute("SELECT * FROM toile_tokens WHERE mc_24h IS NULL AND ts <= ? ORDER BY ts LIMIT ?",
                                  (avant, limit)).fetchall()
 
-    def toile_set_mc(self, valeurs: dict[str, float]) -> None:
-        self.conn.executemany("UPDATE toile_tokens SET mc_24h=? WHERE mint=?", [(v, m) for m, v in valeurs.items()])
+    def toile_a_remesurer(self, avant: int, succes_mc: float, limit: int) -> list[sqlite3.Row]:
+        """Tokens à 50 k$ ou plus à 24 h, à remesurer à 72 h (un rug entre les deux ne compte pas)."""
+        return self.conn.execute("SELECT * FROM toile_tokens WHERE mc_72h IS NULL AND mc_24h >= ? AND ts <= ? "
+                                 "ORDER BY ts LIMIT ?", (succes_mc, avant, limit)).fetchall()
+
+    def toile_echecs_24h(self, succes_mc: float) -> None:
+        """Sous le seuil à 24 h : échec définitif, pas besoin de remesurer."""
+        self.conn.execute("UPDATE toile_tokens SET mc_72h = mc_24h WHERE mc_72h IS NULL AND mc_24h < ?", (succes_mc,))
+        self.conn.commit()
+
+    def toile_set_mc(self, valeurs: dict[str, float], colonne: str = "mc_24h") -> None:
+        assert colonne in ("mc_24h", "mc_72h")
+        self.conn.executemany(f"UPDATE toile_tokens SET {colonne}=? WHERE mint=?", [(v, m) for m, v in valeurs.items()])
         self.conn.commit()
 
     def toile_stats(self, racine: str, succes_mc: float, depuis: int) -> dict:
-        """Créateurs neufs financés par `racine` (via des relais compris) : combien, mesurés à 24 h, réussis, récents."""
+        """Créateurs neufs financés par `racine` (via des relais compris) : combien, jugés à 72 h, réussis, récents."""
         r = self.conn.execute(
             "SELECT COUNT(DISTINCT w.address) AS createurs,"
-            " COUNT(DISTINCT CASE WHEN t.mc_24h IS NOT NULL THEN w.address END) AS juges,"
-            " COUNT(DISTINCT CASE WHEN t.mc_24h >= ? THEN w.address END) AS succes,"
+            " COUNT(DISTINCT CASE WHEN t.mc_72h IS NOT NULL THEN w.address END) AS juges,"
+            " COUNT(DISTINCT CASE WHEN t.mc_72h >= ? THEN w.address END) AS succes,"
             " COUNT(DISTINCT CASE WHEN w.vu >= ? THEN w.address END) AS recents "
             "FROM toile_wallets w JOIN toile_tokens t ON t.creator = w.address WHERE w.racine = ?",
             (succes_mc, depuis, racine)).fetchone()
@@ -423,11 +438,11 @@ class DB:
     def toile_succes(self, racine: str, succes_mc: float, limit: int = 3) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT t.* FROM toile_tokens t JOIN toile_wallets w ON w.address = t.creator "
-            "WHERE w.racine = ? AND t.mc_24h >= ? ORDER BY t.mc_24h DESC LIMIT ?", (racine, succes_mc, limit)).fetchall()
+            "WHERE w.racine = ? AND t.mc_72h >= ? ORDER BY t.mc_72h DESC LIMIT ?", (racine, succes_mc, limit)).fetchall()
 
     def toile_resume(self, succes_mc: float) -> dict:
         n = dict(self.conn.execute("SELECT statut, COUNT(*) FROM toile_wallets GROUP BY statut").fetchall())
-        t = self.conn.execute("SELECT COUNT(*), COUNT(mc_24h), SUM(mc_24h >= ?) FROM toile_tokens",
+        t = self.conn.execute("SELECT COUNT(*), COUNT(mc_72h), SUM(mc_72h >= ?) FROM toile_tokens",
                               (succes_mc,)).fetchone()
         n["financeurs"] = self.conn.execute(
             "SELECT COUNT(DISTINCT racine) FROM toile_wallets WHERE statut = 'neuf'").fetchone()[0]
@@ -438,7 +453,7 @@ class DB:
         """Cache des wallets sans lien sûr : quelques jours. Toile : deux mois, sauf les succès (gardés)."""
         n = self.conn.execute("DELETE FROM toile_wallets WHERE statut NOT IN ('neuf', 'relais') AND vu < ?",
                               (cache_avant,)).rowcount
-        n += self.conn.execute("DELETE FROM toile_tokens WHERE ts < ? AND COALESCE(mc_24h, 0) < ?",
+        n += self.conn.execute("DELETE FROM toile_tokens WHERE ts < ? AND COALESCE(mc_72h, 0) < ?",
                                (garde_avant, succes_mc)).rowcount
         n += self.conn.execute("DELETE FROM toile_wallets WHERE vu < ? AND address NOT IN "
                                "(SELECT creator FROM toile_tokens)", (garde_avant,)).rowcount

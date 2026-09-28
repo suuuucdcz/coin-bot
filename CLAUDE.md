@@ -82,8 +82,22 @@ Règles ajoutées à l'usage :
 - **Toile (`toile.py`)** : RPC publics gratuits seulement (publicnode : ~1,7 jour d'historique ; RPC officiel
   `api.mainnet-beta` : historique complet, 0,5 req/s). Un lien n'entre que si le wallet est **confirmé neuf** par
   l'historique complet (vu en vrai : wallets vidés puis refinancés, pris pour neufs sur publicnode). Succès = market
-  cap ≥ 50 k$ 24 h après la création (DexScreener). Financeur promu (« bank à succès », confiance « prouvé ») : ≥ 2
-  créateurs à succès, ≥ 25 % de réussite, ≤ 50 créateurs en 7 jours, pas un service.
+  cap ≥ 50 k$ 24 h ET 72 h après la création (DexScreener ; les faux fonds Reserve tiennent souvent 1 à 2 jours).
+  Financeur promu (« bank à succès », confiance « prouvé ») : ≥ 2 créateurs à succès, ≥ 25 % de réussite, ≤ 50
+  créateurs en 7 jours, pas un service, réseau sans rugs (`network.quick`). Un exchange coupe toujours une chaîne.
+- **Réseau à rugs « en série »** (`network.py`) : au moins 2 projets vidés / rug, ou un faux succès ≥ 1 M$ tombé à
+  −99 %. Un seul token raté ne suffit pas (vu en vrai : $goon classé à tort). Le leurre seul (test à 0,01 SOL) ne
+  classe pas un dev. Les réseaux Reserve montent souvent ×5 à ×20 avant le rug : c'est leur fin qui les classe.
+- Ventes et déplacements de supply : seulement pour un token suivi de moins de 7 jours (`SUIVI_MAX_S`). Après une
+  1re vente alertée, toute vente ≥ 10 SOL du même wallet repart (« 🚨 LE DEV VIDE SA POSITION », 1 par 10 min) :
+  vu le 28/09, le dev vendait un peu à +2 min puis vidait tout au sommet 2 h plus tard, sans alerte.
+- **Structure (🧱 ferme de wallets, `enrich.ferme`)** : ≥ 8 gros détenteurs aux parts quasi identiques (±10 %) = supply
+  tenue par un opérateur (faux fonds Reserve : 10 × 0,99 % ; WEPE / Nasduck : wallets financés par le bank du dev).
+  Information sur l'alerte, pas un signal bloquant. Une chaîne de relais seule ne classe ⛔ que si le token a une ferme
+  (vu : $YAP, marché organique, classé à tort).
+- **Découverte** : elle regarde des tokens de 1 à 7 jours pour trouver des DEVS ; ses listes ne partent plus sur
+  Telegram (vues « un jour après », inutiles pour entrer), seulement dans le journal. Confiance « prouvé » seulement
+  pour un succès vérifié sur DexScreener ; `python -m radar.discovery --revalider` réévalue les anciennes découvertes.
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 

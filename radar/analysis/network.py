@@ -39,6 +39,9 @@ MAX_PROJECT_WALLETS = 25   # wallets dont on liste les projets pump.fun
 SELL_TX = 40               # premières transactions lues pour mesurer la revente du dev
 SELL_PROJECTS = 3
 RUG_DROP = 0.99            # −99 % depuis un ATH d'au moins 100 k$ = liquidité retirée
+BIG_RUG_ATH = 1_000_000    # « succès » fabriqué : des millions puis −99 % (réseau Reserve : 3 à 46 M$ puis 2 k$)
+LEURRE_FLAG = "financement brouillé : petit envoi leurre"
+RELAIS_FLAG = "financement brouillé : chaîne de relais"
 CHAIN_HOPS = 3             # remontée du financement du créateur
 BIG_FUNDING_SOL = 50       # financement massif d'un wallet de dev (vu en vrai : 100 SOL relayés 2 fois)
 SAME_AMOUNT = 0.01         # ±1 % = « même montant » d'un relais à l'autre
@@ -137,7 +140,11 @@ class Report:
         ev = self.evaluated
         n, c = len(ev), self.counts()
         mauvais = c["vidé"] + c["rug"]
-        if n >= 1 and mauvais / n >= 0.5:   # même un seul projet, s'il a été vidé ou rug
+        graves = sum(1 for p in ev if p.verdict == "rug" and (p.ath or 0) >= BIG_RUG_ATH)
+        # « En série » : au moins 2 projets vidés ou rug, ou un faux succès à plusieurs M$ tombé à −99 %. Vu en vrai :
+        # un seul projet raté (1 sur 2) classait le dev de $goon en réseau à rugs, alors que $goon tenait à 12 M$
+        # deux jours après (un token raté à 100 k$ puis mort, ça arrive à des devs honnêtes).
+        if n >= 1 and mauvais / n >= 0.5 and (mauvais >= 2 or graves):
             return ("⛔ réseau à rugs en série",
                     f"réseau à rugs : {mauvais}/{n} projets du dev et de ses wallets rug (−99 %) ou vidés en moins d'1 min")
         relances = self.relaunched()
@@ -155,11 +162,10 @@ class Report:
                     "(schéma du cluster Reserve)")
         if any(h.get("leurre") for h in self.funding_chain):
             return ("🟠 leurre anti-traçage",
-                    "financement brouillé : petit envoi leurre juste avant le vrai financement (pour tromper les "
-                    "traceurs)")
+                    LEURRE_FLAG + " juste avant le vrai financement (pour tromper les traceurs)")
         if relais:
             return ("🟠 financement brouillé",
-                    f"financement brouillé : chaîne de relais au même montant ({relais[0]:g} SOL → {relais[1]:g} SOL)")
+                    f"{RELAIS_FLAG} au même montant ({relais[0]:g} SOL → {relais[1]:g} SOL)")
         if n >= 5 and c["succès"] == 0 and (c["mort"] + c["vidé"]) / n >= 0.9:
             return ("🟠 réseau sans aucun succès", f"réseau sans aucun succès : {n} projets, tous morts")
         if c["succès"]:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 from collections import Counter, defaultdict, deque
@@ -380,9 +381,12 @@ async def amain() -> int:
                     continue
                 db.put("discovery_last", int(time.time()))
                 try:
+                    # Plus envoyé sur Telegram : ces coins ont déjà 1 à 7 jours (la découverte cherche des DEVS pour
+                    # leur prochain lancement). Vu en vrai : ces listes arrivaient « un jour après », inutiles pour
+                    # entrer. Le prochain lancement de ces devs, lui, est alerté dès le financement / la création.
                     texte = discovery.report(await discovery.run_once(pipeline))
                     if texte:
-                        tg.enqueue(texte, topic="devs")
+                        log.info("Découverte : %s", re.sub(r"<[^>]+>", "", texte).replace("\n", " | "))
                 except Exception:
                     log.exception("Découverte automatique en échec")
                 await asyncio.sleep(cfg.discovery_every_h * 3600)

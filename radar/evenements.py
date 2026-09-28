@@ -12,7 +12,8 @@ from .analysis.enrich import TokenInfo
 from .confiance import TRUSTED, is_dev_role, is_service, is_upstream_role
 from .reglages import (
     BURST_MAX_ALERTS, BURST_WINDOW_S, CLUSTER_WINDOW_S, DEV_BIG_BUY_PCT, FUNDED_MAX_24H, INDEPENDENT_GROUPS,
-    NEW_WALLET_MAX_TX, RESERVE_MIN_PCT, SUPPLY_IN_MIN_PCT, SUPPLY_OUT_MIN_PCT, YOUNG_TOKEN_S)
+    DUMP_BUCKET_S, DUMP_MIN_SOL, NEW_WALLET_MAX_TX, RESERVE_MIN_PCT, SUIVI_MAX_S, SUPPLY_IN_MIN_PCT, SUPPLY_OUT_MIN_PCT,
+    YOUNG_TOKEN_S)
 from .smart import SMART_GROUP, SMART_TOP_MIN
 from .telegram import esc
 
@@ -57,6 +58,17 @@ class EvenementsMixin:
             await self._cluster_alert(ev, grp, is_dev, entries, akey)
         finally:
             self._inflight.discard(akey)
+
+    def _suivi(self, mint: str | None) -> str | None:
+        """Raison de NE PAS suivre la vente / le déplacement de supply de ce token (None = token suivi et récent).
+        Vu en vrai : un wallet d'un réseau à rugs déplaçait la supply d'un token de 44 jours ($SEAL) : alerte en
+        🏴‍☠️ et analyse complète du token (crédits Helius) pour rien."""
+        tok = self.db.token(mint) if mint else None
+        if tok is None and not self.label(mint) and not self.db.find_announcement(None, mint, 0):
+            return "token non suivi"
+        if tok is not None and tok["created_at"] and time.time() - tok["created_at"] > SUIVI_MAX_S:
+            return "token de plus de 7 jours"
+        return None
 
     def _known_old(self, mint: str | None) -> bool:
         """Token déjà connu comme vieux (plus de 24 h) : un token vieux le reste, inutile de le réanalyser
@@ -248,6 +260,9 @@ class EvenementsMixin:
         key = f"supout:{ev.wallet}:{ev.mint}:{ev.other}"
         if self.already(key):
             return None
+        raison = self._suivi(ev.mint)
+        if raison:
+            return self._skip(f"déplacement de supply : {raison}")
         w = self.db.wallet(ev.wallet)
         info = await self._info(ev.mint, dev=False)
         pct = info.pct_supply(ev.tokens_raw)
@@ -322,22 +337,33 @@ class EvenementsMixin:
     # ⚠️ vente d'un wallet de réserve / du dev
     async def _on_sell(self, ev: Event) -> Alert | None:
         key = f"sell:{ev.wallet}:{ev.mint}"
-        if self.already(key):
-            return None
+        encore = self.already(key)
+        if encore:
+            # Déjà une vente alertée : on ne se tait plus si c'est un gros dump. Vu en vrai ($MrBeast, $INSTA,
+            # $Claude, 28/09) : le dev vend un peu 1 à 7 min après la création (alertée), puis vide tout au sommet
+            # ~2 h plus tard (166 à 226 k$, −99 % en 15 min) : ce dump n'était pas alerté.
+            if ev.sol < DUMP_MIN_SOL:
+                return None
+            key = f"sell:{ev.wallet}:{ev.mint}:{int(time.time()) // DUMP_BUCKET_S}"
+            if self.already(key):
+                return None
         tok = self.db.token(ev.mint)
-        if tok is None and not self.label(ev.mint) and not self.db.find_announcement(None, ev.mint, 0):
-            # Seules les ventes d'un token SUIVI comptent (créé / acheté jeune / annoncé) : sinon chaque revente
-            # d'un bot ou d'un satellite coûtait une analyse complète du token (crédits Helius) pour rien.
-            return self._skip("vente d'un token non suivi")
+        raison = self._suivi(ev.mint)
+        if raison:
+            # Seules les ventes d'un token SUIVI et récent comptent (créé / acheté jeune / annoncé) : sinon chaque
+            # revente d'un bot ou d'un satellite coûtait une analyse complète du token (crédits Helius) pour rien.
+            return self._skip(f"vente : {raison}")
         info = await self._info(ev.mint, dev=False)
         pre_pct = info.pct_supply(ev.pre_tokens_raw) or 0.0
         is_creator = ev.wallet in (info.creator, tok["creator"] if tok else None)
         if pre_pct < RESERVE_MIN_PCT and not is_creator:
             return self._skip("petite vente (moins de 10 % de la supply)")
         titre = "LE DEV VEND" if is_creator else "UN WALLET DE RÉSERVE VEND"
+        if encore:
+            titre = "LE DEV VIDE SA POSITION" if is_creator else "UN WALLET DE RÉSERVE VEND ENCORE"
         head = [self._head(ev), f"📉 Vend {self._amount(info, ev)} (détenait {pre_pct:.1f} %) "
                                 f"contre <b>{ev.sol:.2f} SOL</b>"]
-        text = A.card(f"⚠️ <b>{titre}</b>", info, [], head, A.token_block(info, []))
+        text = A.card(f"{'🚨' if encore else '⚠️'} <b>{titre}</b>", info, [], head, A.token_block(info, []))
         return Alert(key, "sell", text, A.token_buttons(info, ev.wallet, mute=ev.wallet))
     # 🟡 funding / ⚫ profits / 🔁 interne
     async def _on_transfer(self, ev: Event) -> Alert | None:

@@ -12,10 +12,13 @@ bank. Le radar alerte alors dès le funding du nouveau wallet, puis à la créat
 
 Commande de test (n'ajoute rien, affiche seulement) :
     python -m radar.discovery
+Revérifier les anciennes découvertes avec les règles actuelles (modifie la base) :
+    python -m radar.discovery --revalider
 """
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -65,6 +68,7 @@ class Found:
     reason: str = ""
     rug_group: str | None = None     # dev relié à un cluster de rugs connu (surveillé, alertes ⛔)
     upstream: list[str] = field(default_factory=list)   # financeurs non-exchange en amont
+    created: int = 0                 # création du token (la découverte regarde des tokens de 1 à 7 jours)
 
 
 def suspect_market(m: dict, min_mc: float) -> str | None:
@@ -116,7 +120,8 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
     creator = coin["creator"]
     history = await pumpfun.coins_by_creator(pipeline.http, creator) or []
     hits = sum(1 for c in history if (c.get("ath") or 0) >= min_ath / 2)
-    f = Found(creator, coin.get("symbol") or "?", coin["mint"], coin.get("ath") or 0, len(history), hits)
+    f = Found(creator, coin.get("symbol") or "?", coin["mint"], coin.get("ath") or 0, len(history), hits,
+              created=coin.get("created") or 0)
     if len(history) >= SPAM_MIN_COINS and hits / max(1, len(history)) < SPAM_MAX_HIT_RATE:
         f.reason = f"machine à lancer ({len(history)} tokens, {hits} succès)"
         return f
@@ -131,7 +136,14 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
     if rep is not None:
         f.upstream = [h["src"] for h in rep.funding_chain if not h.get("hot")]
         flag = network.quick_verdict(rep)
-        if flag:
+        if flag and flag.startswith(network.RELAIS_FLAG) and not await _ferme(pipeline, coin["mint"], creator):
+            # Chaîne de relais au même montant SANS ferme de wallets dans le token : pas assez pour ⛔. Vu en vrai :
+            # $YAP (5,7 M$, 14,5 M$ de vrai volume, détenteurs variés) classé arnaque pour 3,36 SOL relayés deux fois.
+            f.funder_note = f"🟠 {flag}"
+            flag = None
+        if flag and not flag.startswith(network.LEURRE_FLAG):
+            # Un petit envoi avant le vrai financement, seul, ne suffit pas : beaucoup de gens envoient d'abord
+            # 0,01 SOL pour tester l'adresse. Il reste affiché (🟠) sur la fiche du réseau.
             # Chaîne de relais au même montant, réseau à rugs, relances du même nom… : suivi en ⛔
             f.rug_group = NETWORK_RUG_GROUP if "réseau à rugs" in flag else SUSPECT_GROUP
             f.reason = f"⛔ {flag}"
@@ -166,6 +178,17 @@ async def evaluate(pipeline, coin: dict, min_ath: float) -> Found:
                 f.reason = (f"⛔ financement massif ({funding['amount']:,.0f} SOL) : schéma des faux fonds "
                             "souverains").replace(",", " ")
     return f
+
+
+async def _ferme(pipeline, mint: str, creator: str) -> bool:
+    """Le token a-t-il une ferme de wallets (gros détenteurs aux parts quasi identiques) ? Dans le doute : oui."""
+    from .analysis.enrich import FERME_MIN, ferme
+    from .smart import top_holders
+    try:
+        parts = dict(await top_holders(pipeline.rpc, mint, 20))
+    except Exception:
+        return True
+    return ferme(parts, creator)[0] >= FERME_MIN
 
 
 def _same_operator(db, f: Found) -> None:
@@ -229,20 +252,57 @@ async def run_once(pipeline, dry_run: bool = False) -> list[Found]:
     return out
 
 
+def _depuis(f: Found) -> str:
+    return A.age(int(time.time() - f.created)) if f.created else "?"
+
+
 def report(found: list[Found]) -> str | None:
     added = [f for f in found if f.added and not f.rug_group]
     rugs = [f for f in found if f.added and f.rug_group]
+    # L'âge du token est affiché : la découverte regarde des tokens lancés il y a 1 à 7 jours (vu en vrai : ces
+    # listes donnaient l'impression que le radar analysait de vieux coins comme s'ils sortaient)
     lignes_rug = [f"⛔ <b>{len(rugs)} dev(s) du cluster de rugs repéré(s)</b> (surveillés, alertes marquées à éviter) : "
-                  + ", ".join(f"${esc(f.symbol)}" for f in rugs)] if rugs else []
+                  + ", ".join(f"${esc(f.symbol)} (lancé il y a {_depuis(f)})" for f in rugs)] if rugs else []
     if not added:
         return "\n".join(["🧭 <b>Découverte</b>"] + lignes_rug) if rugs else None
     lines = [f"🧭 <b>Découverte : {len(added)} dev(s) ajouté(s) à la surveillance</b>",
-             "<i>Créateurs de tokens pump.fun qui ont vraiment marché ces 3 derniers jours. "
+             "<i>Créateurs de tokens pump.fun lancés il y a 1 à 7 jours et qui ont vraiment tenu. "
              "Leur prochain lancement (nouveau wallet financé par le même bank) sera signalé.</i>"]
     for f in added:
-        lines.append(f"• <b>${esc(f.symbol)}</b> MC {A.usd(f.ath)} · dev <code>{f.creator}</code> · "
+        lines.append(f"• <b>${esc(f.symbol)}</b> MC {A.usd(f.ath)} · lancé il y a {_depuis(f)} · dev <code>{f.creator}</code> · "
                      f"{f.coins} token(s), {f.hits} succès" + (f"\n   ↳ {esc(f.funder_note)}" if f.funder_note else ""))
     return "\n".join(lines + lignes_rug)
+
+
+async def revalider(pipeline) -> list[str]:
+    """Anciennes découvertes (avant la vérification DexScreener et l'analyse de réseau : rôle « dev (découverte :
+    $X ATH … M$) ») et devs reclassés ⛔ sur une seule règle faible, réévalués avec les règles actuelles. Vu en vrai : 19 devs du réseau Reserve y gardaient la
+    confiance « prouvé » grâce à des ATH absurdes renvoyés par pump.fun (AROS « 482 M$ », XBC « 407 M$ »)."""
+    cfg, db = pipeline.cfg, pipeline.db
+    lignes = []
+    anciens = db.conn.execute(
+        "SELECT * FROM wallets WHERE (grp = ? AND role LIKE 'dev (découverte%' AND role NOT LIKE '%vérifiée DexScreener%')"
+        # reclassés sur une seule règle faible, revue le 28/09 (relais seuls, « 1 projet raté »)
+        " OR role LIKE 'dev reclassé : financement brouillé : chaîne de relais%'"
+        " OR role LIKE 'dev reclassé : réseau à rugs : 1/%'", (GROUP,)).fetchall()
+    for w in anciens:
+        coins = await pumpfun.coins_by_creator(pipeline.http, w["address"]) or []
+        coin = max(coins, key=lambda c: c.get("ath") or 0, default=None)
+        if coin is None:
+            continue
+        sym = (coin.get("symbol") or "?")[:10]
+        marche = (await dexscreener.markets(pipeline.http, [coin["mint"]])).get(coin["mint"])
+        f = await evaluate(pipeline, {**coin, "creator": w["address"]}, cfg.discovery_min_ath)
+        faux = f.reason or (suspect_market(marche, cfg.discovery_min_ath) if marche else "plus de marché")
+        if f.rug_group:
+            grp, role = f.rug_group, f"dev reclassé : {f.reason.removeprefix('⛔ ')}"
+        elif faux:
+            grp, role = GROUP, f"dev d'une ancienne découverte non confirmée (${sym} : {faux})"
+        else:
+            grp, role = GROUP, f"dev (découverte : ${sym}, MC {A.usd(marche['mc'])} vérifiée DexScreener)"
+        db.set_wallet_role(w["address"], w["label"], grp, role, w["depth"])
+        lignes.append(f"{w['label']} -> {grp} : {role}")
+    return lignes
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +326,11 @@ def main() -> int:
         db.import_labels(cfg.labels_path)
         async with SolanaRPC(cfg.rpc_url) as rpc, aiohttp.ClientSession() as http:
             p = Pipeline(cfg, db, rpc, http, None, None, dry_run=True)
+            if "--revalider" in sys.argv:
+                for ligne in await revalider(p):
+                    print(ligne)
+                db.close()
+                return 0
             found = await run_once(p, dry_run=True)
         db.close()
         if not found:
