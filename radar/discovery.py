@@ -132,7 +132,7 @@ async def evaluate(pipeline, coin: dict, min_ath: float, ignorer: frozenset[str]
     # Il est suivi AVEC le groupe ⛔ : ses prochains tokens seront marqués à éviter.
     from .analysis import network
     try:
-        rep = await network.quick(pipeline, creator)
+        rep = await network.quick(pipeline, creator, network.CHUTES_PAR_ANALYSE)
     except Exception:
         rep = None
     if rep is not None:
@@ -286,9 +286,10 @@ async def revalider(pipeline) -> list[str]:
     lignes = []
     anciens = db.conn.execute(
         "SELECT * FROM wallets WHERE (grp = ? AND role LIKE 'dev (découverte%' AND role NOT LIKE '%vérifiée DexScreener%')"
-        # reclassés sur une seule règle faible, revue le 28/09 (relais seuls, « 1 projet raté »)
+        # reclassés sur une règle revue le 28/09 : relais seuls, « 1 projet raté », et tout « réseau à rugs » (un projet
+        # éteint doucement comptait comme un rug : seule une chute brutale en est un)
         " OR role LIKE 'dev reclassé : financement brouillé : chaîne de relais%'"
-        " OR role LIKE 'dev reclassé : réseau à rugs : 1/%'"
+        " OR role LIKE 'dev reclassé : réseau à rugs%'"
         " OR role LIKE 'dev reclassé : lié au cluster%'", (GROUP,)).fetchall()
     for w in anciens:
         coins = await pumpfun.coins_by_creator(pipeline.http, w["address"]) or []

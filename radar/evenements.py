@@ -11,10 +11,11 @@ from .analysis.classify import Event
 from .analysis.enrich import TokenInfo
 from .confiance import TRUSTED, is_dev_role, is_service, is_upstream_role
 from .reglages import (
-    BURST_MAX_ALERTS, BURST_WINDOW_S, CLUSTER_WINDOW_S, DEV_BIG_BUY_PCT, FUNDED_MAX_24H, INDEPENDENT_GROUPS,
-    DUMP_BUCKET_S, DUMP_MIN_SOL, NEW_WALLET_MAX_TX, RESERVE_MIN_PCT, SUIVI_MAX_S, SUPPLY_IN_MIN_PCT, SUPPLY_OUT_MIN_PCT,
+    BURST_MAX_ALERTS, BURST_WINDOW_S, CLUSTER_WINDOW_S, DEV_BIG_BUY_PCT, DUMP_BUCKET_S, DUMP_MIN_SOL, FUNDED_MAX_24H,
+    INDEPENDENT_GROUPS, NEW_WALLET_MAX_TX, RESERVE_MIN_PCT, SUIVI_MAX_S, SUPPLY_IN_MIN_PCT, SUPPLY_OUT_MIN_PCT, VIVANT_MC,
     YOUNG_TOKEN_S)
 from .smart import SMART_GROUP, SMART_TOP_MIN
+from .sources import dexscreener
 from .telegram import esc
 
 log = logging.getLogger("pipeline")
@@ -59,15 +60,18 @@ class EvenementsMixin:
         finally:
             self._inflight.discard(akey)
 
-    def _suivi(self, mint: str | None) -> str | None:
-        """Raison de NE PAS suivre la vente / le déplacement de supply de ce token (None = token suivi et récent).
-        Vu en vrai : un wallet d'un réseau à rugs déplaçait la supply d'un token de 44 jours ($SEAL) : alerte en
-        🏴‍☠️ et analyse complète du token (crédits Helius) pour rien."""
+    async def _suivi(self, mint: str | None) -> str | None:
+        """Raison de NE PAS suivre la vente / le déplacement de supply de ce token (None = token suivi).
+        Vu en vrai : un wallet d'un réseau à rugs déplaçait la supply d'un token mort de 44 jours ($SEAL) : alerte
+        et analyse complète (crédits Helius) pour rien. Un token de plus de 7 jours reste suivi s'il vaut encore
+        quelque chose : des coins vivent et descendent doucement pendant des semaines (DexScreener, gratuit)."""
         tok = self.db.token(mint) if mint else None
         if tok is None and not self.label(mint) and not self.db.find_announcement(None, mint, 0):
             return "token non suivi"
         if tok is not None and tok["created_at"] and time.time() - tok["created_at"] > SUIVI_MAX_S:
-            return "token de plus de 7 jours"
+            m = (await dexscreener.markets(self.http, [mint])).get(mint) if self.http is not None else None
+            if not m or (m.get("mc") or 0) < VIVANT_MC:
+                return "token de plus de 7 jours, mort"
         return None
 
     def _known_old(self, mint: str | None) -> bool:
@@ -260,7 +264,7 @@ class EvenementsMixin:
         key = f"supout:{ev.wallet}:{ev.mint}:{ev.other}"
         if self.already(key):
             return None
-        raison = self._suivi(ev.mint)
+        raison = await self._suivi(ev.mint)
         if raison:
             return self._skip(f"déplacement de supply : {raison}")
         w = self.db.wallet(ev.wallet)
@@ -348,7 +352,7 @@ class EvenementsMixin:
             if self.already(key):
                 return None
         tok = self.db.token(ev.mint)
-        raison = self._suivi(ev.mint)
+        raison = await self._suivi(ev.mint)
         if raison:
             # Seules les ventes d'un token SUIVI et récent comptent (créé / acheté jeune / annoncé) : sinon chaque
             # revente d'un bot ou d'un satellite coûtait une analyse complète du token (crédits Helius) pour rien.

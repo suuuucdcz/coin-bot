@@ -25,7 +25,7 @@ async def markets(session: aiohttp.ClientSession, mints: list[str]) -> dict[str,
             mint = (p.get("baseToken") or {}).get("address")
             liq = (p.get("liquidity") or {}).get("usd") or 0
             if mint and liq >= (out.get(mint) or {}).get("liquidity", -1):
-                out[mint] = {"mc": p.get("marketCap") or p.get("fdv"), "liquidity": liq,
+                out[mint] = {"mc": p.get("marketCap") or p.get("fdv"), "liquidity": liq, "dex": p.get("dexId"),
                              "volume24h": (p.get("volume") or {}).get("h24"),
                              "txns24h": sum(((p.get("txns") or {}).get("h24") or {}).get(k) or 0 for k in ("buys", "sells"))}
         await asyncio.sleep(0.3)

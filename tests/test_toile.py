@@ -143,7 +143,7 @@ def test_rpc_public_muet_rien_n_est_enregistre(setup):  # noqa: F811
     assert db.toile_wallet(creator) is None and t.stats["erreurs"] == 1   # réessayé à son prochain token
 
 
-def _createurs(pub, t, n, age_s=73 * H, src=BANK):
+def _createurs(pub, t, n, age_s=7 * H, src=BANK):
     out = []
     for i in range(n):
         c = f"C{i}succes" + "s" * (34 - len(str(i)))
@@ -154,14 +154,23 @@ def _createurs(pub, t, n, age_s=73 * H, src=BANK):
 
 
 def _marches(monkeypatch, valeurs):
+    """DexScreener remplacé : {mint: (market cap, marché)} ; « pumpswap » = a quitté la courbe pump.fun."""
     async def markets(http, mints):
-        return {m: {"mc": valeurs[m]} for m in mints if m in valeurs}
+        return {m: {"mc": valeurs[m][0], "dex": valeurs[m][1]} for m in mints if m in valeurs}
     monkeypatch.setattr(T.dexscreener, "markets", markets)
+
+
+def _chutes(monkeypatch, historiques):
+    """Historique de prix remplacé : {mint: (plus haut, vitesse de la chute)} ; absent = pas de données."""
+    async def chute_token(http, db, mint, fin=None):
+        h = historiques.get(mint)
+        return {"pic": h[0], "pic_ts": 0, "chute": h[1], "duree": None} if h else None
+    monkeypatch.setattr(T.geckoterminal, "chute_token", chute_token)
 
 
 def _reseau(monkeypatch, drapeau=None):
     """Analyse de réseau (Helius) remplacée : propre, ou avec un drapeau rouge."""
-    async def quick(pipeline, creator):
+    async def quick(pipeline, creator, budget=0):
         return "rapport"
     monkeypatch.setattr(T.network, "quick", quick)
     monkeypatch.setattr(T.network, "quick_verdict", lambda rep: drapeau)
@@ -173,8 +182,11 @@ def test_financeur_a_succes_promu_puis_alerte_des_la_creation(setup, monkeypatch
     p, t = _toile(db, tg, pub, http=object())
     _reseau(monkeypatch)
     _createurs(pub, t, 4)
-    _marches(monkeypatch, {"MINTs0": 120_000, "MINTs1": 64_000, "MINTs2": 5_000})   # MINTs3 : plus indexé = mort
-    assert asyncio.run(t.mesurer()) == 6   # 4 mesures à 24 h, puis les 2 qui tenaient remesurées à 72 h
+    _marches(monkeypatch, {"MINTs0": (900_000, "pumpswap"), "MINTs1": (45_000, "pumpswap"),
+                           "MINTs2": (5_000, "pumpfun")})                     # MINTs3 : plus indexé = mort
+    # MINTs1 est redescendu DOUCEMENT de 1,2 M$ à 45 k$ : un coin qui a vécu, pas un rug (remarque du 28/09)
+    _chutes(monkeypatch, {"MINTs0": (2_500_000, "aucune"), "MINTs1": (1_200_000, "lente")})
+    assert asyncio.run(t.juger()) == 4                                         # jugés 6 h après, pas 72 h
     assert db.get(f"toile_promu:{BANK}") and p.trust(BANK) == "prouvé" and BANK in p.watched
     assert db.wallet(BANK)["role"].startswith("bank à succès (toile : 2 créateurs neufs sur 4")
     assert any("TOILE : nouveau financeur à succès" in s and "$MINT" in s for s in tg.sent)
@@ -194,17 +206,50 @@ def test_pas_de_promotion_sous_25_pour_cent_ni_pour_un_service(setup, monkeypatc
     p, t = _toile(db, tg, pub, http=object())
     _reseau(monkeypatch)
     _createurs(pub, t, 10)
-    _marches(monkeypatch, {"MINTs0": 90_000, "MINTs1": 70_000})                      # 2 sur 10 = 20 %
-    asyncio.run(t.mesurer())
+    _marches(monkeypatch, {"MINTs0": (90_000, "pumpswap"), "MINTs1": (70_000, "pumpswap")})   # 2 sur 10 = 20 %
+    _chutes(monkeypatch, {"MINTs0": (300_000, "aucune"), "MINTs1": (250_000, "aucune"),
+                          "MINTs10": (400_000, "aucune"), "MINTs11": (200_000, "aucune")})
+    asyncio.run(t.juger())
     assert not db.get(f"toile_promu:{BANK}") and BANK not in p.watched
     # Exchange : 1 000 tx en moins de 4 h, même avec de bons clients
-    db2_bank = "EXCHtoileeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-    pub.hist[db2_bank] = [(f"x{i}", 10_000 - i) for i in range(1000)]
-    clients = [c for c in _createurs(pub, t, 12, src=db2_bank)][10:]
-    _marches(monkeypatch, {"MINTs10": 90_000, "MINTs11": 70_000})
-    asyncio.run(t.mesurer())
-    assert db.toile_wallet(clients[0])["racine"] == db2_bank
-    assert db.get(f"toile_service:{db2_bank}") == "1" and db2_bank not in p.watched
+    exchange = "EXCHtoileeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    pub.hist[exchange] = [(f"x{i}", 10_000 - i) for i in range(1000)]
+    clients = _createurs(pub, t, 12, src=exchange)[10:]
+    _marches(monkeypatch, {"MINTs10": (90_000, "pumpswap"), "MINTs11": (70_000, "pumpswap")})
+    asyncio.run(t.juger())
+    assert db.toile_wallet(clients[0])["racine"] == exchange
+    assert db.get(f"toile_service:{exchange}") == "1" and exchange not in p.watched
+
+
+def test_rug_brutal_bloque_puis_rug_tardif_declasse(setup, monkeypatch):  # noqa: F811
+    db, tg = setup
+    pub = FakePublic()
+    p, t = _toile(db, tg, pub, http=object())
+    _reseau(monkeypatch)
+    _createurs(pub, t, 3)
+    tous = {f"MINTs{i}": (600_000, "pumpswap") for i in range(3)}
+    _marches(monkeypatch, tous)
+    # MINTs2 : de 3 M$ à 2 k$ en 15 min (rug). Deux succès, mais un opérateur qui vide ses tokens n'est pas promu
+    _chutes(monkeypatch, {"MINTs0": (800_000, "aucune"), "MINTs1": (500_000, "lente"), "MINTs2": (3_000_000, "brutale")})
+    asyncio.run(t.juger())
+    st = t.stats_racine(BANK)
+    assert (st["succes"], st["rugs"]) == (2, 1) and not db.get(f"toile_promu:{BANK}") and BANK not in p.watched
+    # Autre financeur, promu à 6 h ; vu en vrai : les faux fonds Reserve tiennent 1 à 2 jours puis sont vidés
+    autre = "AUTRbankaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    pub.hist[autre] = [(f"a{i}", 800 - i) for i in range(10)]
+    a0, a1 = [f"A{i}autreaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" for i in range(2)]
+    for i, c in enumerate((a0, a1)):
+        pub.neuf(c, src=autre)
+        _token(t, c, f"MINTa{i}", 7 * H)
+    historiques = {"MINTa0": (16_000_000, "aucune"), "MINTa1": (3_000_000, "aucune")}
+    _marches(monkeypatch, {"MINTa0": (15_000_000, "pumpswap"), "MINTa1": (2_000_000, "pumpswap")})
+    _chutes(monkeypatch, historiques)
+    asyncio.run(t.juger())
+    assert db.get(f"toile_promu:{autre}") not in (None, "0") and p.trust(autre) == "prouvé"
+    historiques["MINTa0"] = (16_000_000, "brutale")                               # vidé avant la revue de 24 h
+    asyncio.run(t.juger(now=time.time() + 18 * H))
+    assert db.wallet(autre)["grp"] == "reseau-rugs" and p.trust(autre) == "faible"
+    assert any("TOILE : TOILE_AUTR déclassé" in s for s in tg.sent)
 
 
 def test_dexscreener_muet_on_reessaie(setup, monkeypatch):  # noqa: F811
@@ -213,9 +258,43 @@ def test_dexscreener_muet_on_reessaie(setup, monkeypatch):  # noqa: F811
     p, t = _toile(db, tg, pub, http=object())
     _createurs(pub, t, 1)
     _marches(monkeypatch, {})
-    assert asyncio.run(t.mesurer()) == 0
-    assert db.conn.execute("SELECT mc_24h FROM toile_tokens").fetchone()[0] is None     # pas marqué « mort »
-    assert asyncio.run(t.mesurer(now=time.time() + 3 * 86400)) == 1                    # abandon après 3 jours
+    assert asyncio.run(t.juger()) == 0
+    assert db.conn.execute("SELECT verdict FROM toile_tokens").fetchone()[0] is None   # pas marqué « raté »
+    assert asyncio.run(t.juger(now=time.time() + 3 * 86400)) == 1                     # abandon après 3 jours
+
+
+def test_menage(setup):  # noqa: F811
+    db, tg = setup
+    now = int(time.time())
+    db.toile_put("VIEUXcache", "reutilise")
+    db.conn.execute("UPDATE toile_wallets SET vu=? WHERE address='VIEUXcache'", (now - 10 * 86400,))
+    db.toile_put("OKneuf", "neuf", BANK, 1.0, now - 70 * 86400, BANK)
+    db.toile_put("MORTneuf", "neuf", BANK, 1.0, now - 70 * 86400, BANK)
+    db.conn.execute("UPDATE toile_wallets SET vu=? WHERE address IN ('OKneuf', 'MORTneuf')", (now - 70 * 86400,))
+    db.toile_add_token("MINTok", "OKneuf", "OK", now - 70 * 86400)
+    db.toile_add_token("MINTmort", "MORTneuf", "RIP", now - 70 * 86400)
+    db.toile_juger("MINTok", "succès", 2_000_000, now)
+    db.toile_juger("MINTmort", "raté", None, now)
+    db.toile_purge(now - T.CACHE_JOURS * 86400, now - T.GARDE_JOURS * 86400)
+    restes = {r[0] for r in db.conn.execute("SELECT address FROM toile_wallets")}
+    assert restes == {"OKneuf"}   # le succès reste, le reste part
+
+
+def test_reseau_a_rugs_bloque_la_promotion(setup, monkeypatch):  # noqa: F811
+    db, tg = setup
+    pub = FakePublic()
+    p, t = _toile(db, tg, pub, http=object())
+    _reseau(monkeypatch, "réseau à rugs : 5/6 projets du dev et de ses wallets rug (−99 %)")
+    _createurs(pub, t, 2)
+    _marches(monkeypatch, {"MINTs0": (300_000, "pumpswap"), "MINTs1": (90_000, "pumpswap")})
+    _chutes(monkeypatch, {"MINTs0": (700_000, "aucune"), "MINTs1": (400_000, "aucune")})
+    asyncio.run(t.juger())
+    assert db.get(f"toile_promu:{BANK}") == "0" and BANK not in p.watched       # jugé, jamais promu
+    assert not any("TOILE : nouveau financeur" in s for s in tg.sent)
+    # Le leurre seul (test d'adresse à 0,01 SOL) ne bloque pas
+    db.conn.execute("DELETE FROM settings WHERE key LIKE 'toile_promu:%'")
+    _reseau(monkeypatch, T.network.LEURRE_FLAG + " juste avant le vrai financement")
+    assert asyncio.run(t.examiner(BANK)) and BANK in p.watched
 
 
 def test_lancement_qui_decolle_remonte_par_la_toile_sans_helius(setup):  # noqa: F811
@@ -233,23 +312,6 @@ def test_lancement_qui_decolle_remonte_par_la_toile_sans_helius(setup):  # noqa:
     res = asyncio.run(p.lancements.remonter({"mint": "MINT7", "creator": creator, "symbol": "UP", "mc": 40_000,
                                              "txns": 90, "ts": time.time()}))
     assert res and res["genre"] == "rug" and [h["src"] for h in res["chaine"]] == [RELAIS, BANK]
-
-
-def test_menage(setup):  # noqa: F811
-    db, tg = setup
-    now = int(time.time())
-    db.toile_put("VIEUXcache", "reutilise")
-    db.conn.execute("UPDATE toile_wallets SET vu=? WHERE address='VIEUXcache'", (now - 10 * 86400,))
-    db.toile_put("OKneuf", "neuf", BANK, 1.0, now - 70 * 86400, BANK)
-    db.toile_put("MORTneuf", "neuf", BANK, 1.0, now - 70 * 86400, BANK)
-    db.conn.execute("UPDATE toile_wallets SET vu=? WHERE address IN ('OKneuf', 'MORTneuf')", (now - 70 * 86400,))
-    db.toile_add_token("MINTok", "OKneuf", "OK", now - 70 * 86400)
-    db.toile_add_token("MINTmort", "MORTneuf", "RIP", now - 70 * 86400)
-    db.toile_set_mc({"MINTok": 200_000, "MINTmort": 3_000})
-    db.toile_set_mc({"MINTok": 180_000, "MINTmort": 3_000}, "mc_72h")
-    db.toile_purge(now - T.CACHE_JOURS * 86400, now - T.GARDE_JOURS * 86400, T.SUCCES_MC)
-    restes = {r[0] for r in db.conn.execute("SELECT address FROM toile_wallets")}
-    assert restes == {"OKneuf"}   # le succès reste, le reste part
 
 
 def test_exchange_qui_a_finance_un_faux_coin_ne_relie_pas_ses_clients(setup):  # noqa: F811
@@ -278,36 +340,3 @@ def test_exchange_qui_a_finance_un_faux_coin_ne_relie_pas_ses_clients(setup):  #
     _token(t, client2, "MINT9")
     assert not any("RÉSEAU À RUGS" in s for s in tg.sent)
     assert pub.calls - avant == 2      # signatures + 1re tx du client ; ni test de relais, ni test de service
-
-
-def test_rug_entre_24_h_et_72_h_n_est_pas_un_succes(setup, monkeypatch):  # noqa: F811
-    # Vu en vrai : VSOF tenait à 16 M$ 30 h après sa création, puis 2 k$ ; SAI 45 h. À 24 h, ils passaient pour
-    # des succès : leur bank serait devenu un « bank à succès » (confiance « prouvé », alertes ‼️).
-    db, tg = setup
-    pub = FakePublic()
-    p, t = _toile(db, tg, pub, http=object())
-    _reseau(monkeypatch)
-    _createurs(pub, t, 2, age_s=25 * H)
-    valeurs = {"MINTs0": 4_000_000, "MINTs1": 2_500_000}
-    _marches(monkeypatch, valeurs)
-    assert asyncio.run(t.mesurer()) == 2 and not db.get(f"toile_promu:{BANK}")    # à 24 h : pas encore jugé
-    valeurs.update(MINTs0=2_100, MINTs1=1_900)                                     # vidés avant 72 h
-    assert asyncio.run(t.mesurer(now=time.time() + 48 * H)) == 2
-    st = t.stats_racine(BANK)
-    assert (st["succes"], st["juges"]) == (0, 2) and BANK not in p.watched
-
-
-def test_reseau_a_rugs_bloque_la_promotion(setup, monkeypatch):  # noqa: F811
-    db, tg = setup
-    pub = FakePublic()
-    p, t = _toile(db, tg, pub, http=object())
-    _reseau(monkeypatch, "réseau à rugs : 5/6 projets du dev et de ses wallets rug (−99 %)")
-    _createurs(pub, t, 2)
-    _marches(monkeypatch, {"MINTs0": 300_000, "MINTs1": 90_000})
-    asyncio.run(t.mesurer())
-    assert db.get(f"toile_promu:{BANK}") == "0" and BANK not in p.watched       # jugé, jamais promu
-    assert not any("TOILE : nouveau financeur" in s for s in tg.sent)
-    # Le leurre seul (test d'adresse à 0,01 SOL) ne bloque pas
-    db.conn.execute("DELETE FROM settings WHERE key LIKE 'toile_promu:%'")
-    _reseau(monkeypatch, T.network.LEURRE_FLAG + " juste avant le vrai financement")
-    assert asyncio.run(t.examiner(BANK)) and BANK in p.watched

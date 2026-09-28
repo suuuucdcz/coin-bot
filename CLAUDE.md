@@ -81,14 +81,19 @@ Règles ajoutées à l'usage :
   0,01 SOL via relais 1 s avant les 200 SOL du bank). **Tempête** : > 600 notifications en 10 min = adresse coupée.
 - **Toile (`toile.py`)** : RPC publics gratuits seulement (publicnode : ~1,7 jour d'historique ; RPC officiel
   `api.mainnet-beta` : historique complet, 0,5 req/s). Un lien n'entre que si le wallet est **confirmé neuf** par
-  l'historique complet (vu en vrai : wallets vidés puis refinancés, pris pour neufs sur publicnode). Succès = market
-  cap ≥ 50 k$ 24 h ET 72 h après la création (DexScreener ; les faux fonds Reserve tiennent souvent 1 à 2 jours).
-  Financeur promu (« bank à succès », confiance « prouvé ») : ≥ 2 créateurs à succès, ≥ 25 % de réussite, ≤ 50
-  créateurs en 7 jours, pas un service, réseau sans rugs (`network.quick`). Un exchange coupe toujours une chaîne.
-- **Réseau à rugs « en série »** (`network.py`) : au moins 2 projets vidés / rug, ou un faux succès ≥ 1 M$ tombé à
-  −99 %. Un seul token raté ne suffit pas (vu en vrai : $goon classé à tort). Le leurre seul (test à 0,01 SOL) ne
+  l'historique complet (vu en vrai : wallets vidés puis refinancés, pris pour neufs sur publicnode). Jugement 6 h
+  après la création sur l'historique de prix : succès = plus haut ≥ 100 k$ sans chute brutale, même si le coin
+  redescend doucement ensuite ; revu à 24 h et 72 h (un rug tardif déclasse le financeur promu). Financeur promu
+  (« bank à succès », confiance « prouvé ») : ≥ 2 créateurs à succès, ≥ 25 % de réussite, aucun rug, ≤ 50 créateurs
+  en 7 jours, pas un service, réseau sans rugs (`network.quick`). Un exchange coupe toujours une chaîne.
+- **Rug = chute BRUTALE** (`sources/geckoterminal.py`, bougies de 15 min) : de ≥ 50 % du plus haut à ≤ 10 % en moins
+  d'1 h (mesuré sur 51 rugs : 15 à 30 min). Une descente lente n'est pas un rug (remarque de Maxence) : dans un réseau,
+  un projet éteint doucement compte comme succès s'il a dépassé 1 M$. Vitesses mémorisées en base (`chute:<mint>`) ;
+  dans les alertes, mémoire seulement (mesures manquantes en arrière-plan).
+- **Réseau à rugs « en série »** (`network.py`) : au moins 2 projets vidés / rug, ou un faux succès ≥ 1 M$ vidé d'un
+  coup. Un seul token raté ne suffit pas (vu en vrai : $goon classé à tort). Le leurre seul (test à 0,01 SOL) ne
   classe pas un dev. Les réseaux Reserve montent souvent ×5 à ×20 avant le rug : c'est leur fin qui les classe.
-- Ventes et déplacements de supply : seulement pour un token suivi de moins de 7 jours (`SUIVI_MAX_S`). Après une
+- Ventes et déplacements de supply : token suivi de moins de 7 jours, ou plus vieux mais valant encore ≥ 50 k$. Après une
   1re vente alertée, toute vente ≥ 10 SOL du même wallet repart (« 🚨 LE DEV VIDE SA POSITION », 1 par 10 min) :
   vu le 28/09, le dev vendait un peu à +2 min puis vidait tout au sommet 2 h plus tard, sans alerte.
 - **Structure (🧱 ferme de wallets, `enrich.ferme`)** : ≥ 8 gros détenteurs aux parts quasi identiques (±10 %) = supply

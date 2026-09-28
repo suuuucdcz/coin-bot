@@ -3,7 +3,8 @@ from __future__ import annotations
 
 TOP_KINDS = ("create", "cluster", "lp_add", "match", "smart", "relance")   # alertes qui peuvent aller dans « ‼️ À ne pas rater »
 YOUNG_TOKEN_S = 24 * 3600      # « mint jeune » = moins de 24 h
-SUIVI_MAX_S = 7 * 86400        # ventes / déplacements de supply suivis pendant 7 jours après la création
+SUIVI_MAX_S = 7 * 86400        # ventes / déplacements de supply suivis pendant 7 jours après la création…
+VIVANT_MC = 50_000             # … et au-delà tant que le token vaut encore au moins 50 k$
 DUMP_MIN_SOL = 10              # après une 1re vente déjà alertée : nouvelle alerte si ≥ 10 SOL…
 DUMP_BUCKET_S = 600            # … au plus une par tranche de 10 min (wallet, token)
 NEW_WALLET_MAX_TX = 5          # un wallet avec moins de 5 tx = nouveau wallet

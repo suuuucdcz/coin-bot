@@ -354,3 +354,21 @@ def test_le_dump_du_dev_est_alerte_apres_une_premiere_petite_vente(pipe, monkeyp
     assert "🚨" in dump.text and "LE DEV VIDE SA POSITION" in dump.text and "1050.00 SOL" in dump.text
     p.db.mark_alert_sent(dump.key, "sell")
     assert vente("s4", 900.0) is None                    # une seule alerte par tranche de 10 min
+
+
+def test_vieux_token_encore_en_vie_reste_suivi(pipe, monkeypatch):
+    # Remarque du 28/09 : un coin peut vivre et descendre doucement pendant des semaines ; ses ventes comptent
+    from radar import evenements
+    p, db = pipe
+    vieux = "VIEUXvivantxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"
+    db.upsert_token(vieux, "OLD", "Old", WATCHED, int(time.time()) - 20 * 86400)
+    marches = {}
+
+    async def markets(http, mints):
+        return {m: marches[m] for m in mints if m in marches}
+
+    monkeypatch.setattr(evenements.dexscreener, "markets", markets)
+    p.http = object()
+    assert "mort" in asyncio.run(p._suivi(vieux))
+    marches[vieux] = {"mc": 2_400_000, "dex": "pumpswap"}
+    assert asyncio.run(p._suivi(vieux)) is None

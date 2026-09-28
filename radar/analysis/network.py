@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from html import escape
 
-from ..sources import pumpfun
+from ..sources import geckoterminal, pumpfun
 from .classify import token_deltas
 from .tracer import Tracer, save_result
 
@@ -61,20 +61,25 @@ class Project:
     verdict: str = ""
     dev_sell_s: int | None = None      # secondes entre la création et la 1re vente du créateur
     dev_sold_pct: float | None = None  # part revendue de ce que le créateur avait acheté
+    chute: str | None = None           # vitesse de la chute après le plus haut : brutale, lente, aucune (inconnue : None)
 
 
 def classify_project(c: dict, now: float | None = None) -> Project:
     now = now or time.time()
     p = Project(c.get("mint") or "", c.get("symbol"), c.get("creator") or "", c.get("created") or 0, c.get("ath"),
-                c.get("ath_ts"), c.get("mc"), c.get("last_trade"), c.get("complete"))
+                c.get("ath_ts"), c.get("mc"), c.get("last_trade"), c.get("complete"), chute=c.get("chute"))
     age = now - p.created if p.created else None
     drop = (1 - (p.mc or 0) / p.ath) if p.ath else None
     if age is not None and age < RECENT_S:
         p.verdict = "récent"
     elif drop is not None and drop >= RUG_DROP and (p.ath or 0) >= 100_000:
-        # Vu en vrai (cluster Reserve) : 12 à 46 M$ d'ATH puis 2 k$ = liquidité retirée. Un gros ATH suivi
-        # d'une chute de −99 % n'est pas un succès, c'est un rug (le « succès » était fabriqué).
-        p.verdict = "rug"
+        # −99 % depuis le plus haut : rug SEULEMENT si la chute a été brutale. Vu en vrai (cluster Reserve) : 12 à 46 M$
+        # puis 2 k$ en 15 min. Un coin qui a vécu puis s'est éteint en heures ou en jours n'est pas un rug (remarque de
+        # Maxence, 28/09) : il compte comme un succès s'il a dépassé 1 M$. Vitesse inconnue : prudence, rug.
+        if p.chute in ("lente", "aucune"):
+            p.verdict = "succès" if (p.ath or 0) >= SUCCESS_ATH else "mort"
+        else:
+            p.verdict = "rug"
     elif (p.ath or 0) >= SUCCESS_ATH or (p.complete and (p.mc or 0) >= 100_000):
         p.verdict = "succès"
     elif p.ath_ts and p.created and p.ath_ts - p.created <= FLASH_S and drop is not None and drop >= 0.5:
@@ -224,7 +229,54 @@ def _add_wallet(rep: Report, pipeline, addr: str, role: str) -> None:
         rep.wallets[addr] = {"label": pipeline.label(addr) or _short(addr), "role": role}
 
 
-async def _projects(http, wallets: list[str]) -> list[Project]:
+CHUTES_PAR_ANALYSE = 6     # vitesses de chute mesurées tout de suite (GeckoTerminal : 30 requêtes / min)
+_en_mesure: set[str] = set()
+_taches: set = set()
+
+
+async def _chutes(http, db, projets: list[Project], budget: int) -> None:
+    """Vitesse de la chute des projets à −99 % (mémorisée en base). Dans les alertes (budget 0) : seulement la
+    mémoire, et les mesures manquantes partent en arrière-plan pour la prochaine fois."""
+    manquants = []
+    for p in projets:
+        if p.verdict != "rug" or p.chute is not None:
+            continue
+        v = db.get(f"chute:{p.mint}") if db is not None else None
+        if v:
+            p.chute = json.loads(v)["chute"]
+        else:
+            manquants.append(p)
+    async def mesurer(p: Project) -> None:
+        fin = int((p.ath_ts or time.time()) + 5 * 86400)
+        r = await geckoterminal.chute_token(http, db, p.mint, min(fin, int(time.time())))
+        p.chute = r["chute"] if r else None
+    for p in manquants[:budget]:
+        try:
+            await mesurer(p)
+        except Exception as e:
+            log.debug("chute de %s : %s", p.mint[:6], e)
+    reste = [p for p in manquants[budget:] if p.mint not in _en_mesure]
+    if reste and db is not None:
+        async def plus_tard() -> None:
+            for p in reste:
+                _en_mesure.add(p.mint)
+                try:
+                    await mesurer(p)
+                except Exception:
+                    pass
+                finally:
+                    _en_mesure.discard(p.mint)
+        tache = asyncio.get_running_loop().create_task(plus_tard())
+        _taches.add(tache)   # garder une référence (sinon la tâche peut disparaître en cours)
+        tache.add_done_callback(_taches.discard)
+    for i, p in enumerate(projets):
+        if p.chute is not None:
+            q = classify_project({**asdict(p), "chute": p.chute})
+            q.dev_sell_s, q.dev_sold_pct = p.dev_sell_s, p.dev_sold_pct
+            projets[i] = q
+
+
+async def _projects(http, wallets: list[str], db=None, budget: int = 0) -> list[Project]:
     sem = asyncio.Semaphore(4)
 
     async def un(w: str) -> list[Project]:
@@ -237,11 +289,14 @@ async def _projects(http, wallets: list[str]) -> list[Project]:
         if isinstance(lot, list):
             for p in lot:
                 vus.setdefault(p.mint, p)
-    return sorted(vus.values(), key=lambda p: -p.created)
+    projets = sorted(vus.values(), key=lambda p: -p.created)
+    await _chutes(http, db, projets, budget)
+    return projets
 
 
-async def quick(pipeline, creator: str) -> Report:
-    """Version rapide pour les alertes : créateur + financeur + wallets déjà reliés au financeur."""
+async def quick(pipeline, creator: str, budget: int = 0) -> Report:
+    """Version rapide pour les alertes : créateur + financeur + wallets déjà reliés au financeur. `budget` : vitesses
+    de chute mesurées tout de suite (0 dans les alertes : mémoire seulement)."""
     hit = _quick_cache.get(creator)
     if hit and time.time() - hit[0] < QUICK_CACHE_S:
         return hit[1]
@@ -277,7 +332,7 @@ async def quick(pipeline, creator: str) -> Report:
             _add_wallet(rep, pipeline, r["dst"], "frère" if r["kind"] == "frère" else "financé par le même wallet")
             rep.edges.append({"src": premier, "dst": r["dst"], "kind": r["kind"], "sol": r["amount"], "ts": r["ts"]})
     humains = [a for a, w in rep.wallets.items() if w["role"] != "exchange"][:MAX_PROJECT_WALLETS]
-    rep.projects = await _projects(pipeline.http, humains)
+    rep.projects = await _projects(pipeline.http, humains, pipeline.db, budget)
     _quick_cache[creator] = (time.time(), rep)
     return rep
 
@@ -368,7 +423,7 @@ async def build(pipeline, seed: str) -> Report:
 
     # 4. Projets de chaque wallet + vitesse de revente du créateur sur les plus récents
     humains = [a for a, w in rep.wallets.items() if w["role"] != "exchange"][:MAX_PROJECT_WALLETS]
-    rep.projects = await _projects(pipeline.http, humains)
+    rep.projects = await _projects(pipeline.http, humains, db, CHUTES_PAR_ANALYSE)
     for p in [p for p in rep.projects if p.verdict != "récent"][:SELL_PROJECTS]:
         try:
             p.dev_sell_s, p.dev_sold_pct = await dev_sell_speed(rpc, p.mint, p.creator, p.created)

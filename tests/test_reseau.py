@@ -205,7 +205,9 @@ def test_anciennes_decouvertes_non_verifiees_revalidees(tmp_path, monkeypatch):
     assert db.wallet(aros)["grp"] == "reseau-rugs" and db.wallet(aros)["role"].startswith("dev reclassé : réseau")
     assert p.trust(fami) == "prouvé" and "40.9 M$ vérifiée DexScreener" in db.wallet(fami)["role"]
     assert p.trust(yap) == "faible" and "non confirmée" in db.wallet(yap)["role"]
-    assert asyncio.run(discovery.revalider(p)) == []  # rien à refaire
+    # 2e passage : seuls les devs classés « réseau à rugs » sont revus (la règle des rugs a changé), sans changement
+    assert [ligne.split(" -> ")[0] for ligne in asyncio.run(discovery.revalider(p))] == ["DEV_AROS"]
+    assert db.wallet(aros)["grp"] == "reseau-rugs" and p.trust(fami) == "prouvé"
     db.close()
 
 
@@ -240,7 +242,7 @@ def test_chaine_de_relais_seule_ne_classe_pas_sans_ferme(tmp_path, monkeypatch):
     async def coins_by_creator(http, a):
         return []
 
-    async def quick(pipeline, creator):
+    async def quick(pipeline, creator, budget=0):
         return network.Report(creator)
 
     async def rien(self, address):
@@ -279,7 +281,7 @@ def test_revalidation_sans_preuve_circulaire(tmp_path, monkeypatch):
     async def markets(http, mints):
         return {"mYAP": {"mc": 1_800_000, "liquidity": 180_000, "txns24h": 2_500}}
 
-    async def quick(pipeline, creator):
+    async def quick(pipeline, creator, budget=0):
         return network.Report(creator)
 
     async def financement(self, address):
@@ -302,4 +304,49 @@ def test_revalidation_sans_preuve_circulaire(tmp_path, monkeypatch):
     assert lignes and "+ 1 bank" in lignes[0]
     assert db.wallet(dev)["grp"] == "découverte" and "1.8 M$ vérifiée DexScreener" in db.wallet(dev)["role"]
     assert db.wallet(bank)["grp"] == "découverte"
+    db.close()
+
+
+def test_descente_lente_n_est_pas_un_rug():
+    # Remarque du 28/09 : un coin qui a vécu puis s'est éteint doucement n'est pas un rug. Mesuré sur 51 rugs : de
+    # plus de 50 % du plus haut à moins de 10 % en 15 à 30 min ; une descente lente prend des heures ou des jours.
+    from radar.sources import geckoterminal as G
+    q = 900
+    brutal = [(i * q, 1e5, 1e5 * (1 + i), 1e5, 1e5 * (1 + i), 1e3) for i in range(8)] + \
+             [(8 * q, 8e5, 8e5, 2_000, 2_500, 9e4), (9 * q, 2_500, 2_600, 2_000, 2_100, 1e3)]
+    lent = [(i * q, 1e5, 1e5 * (1 + i), 1e5, 1e5 * (1 + i), 1e3) for i in range(8)] + \
+           [((8 + k) * q, 8e5 * 0.9 ** k, 8e5 * 0.9 ** k, 8e5 * 0.9 ** (k + 1), 8e5 * 0.9 ** (k + 1), 1e3) for k in range(40)]
+    tient = [(i * q, 1e5, 1e5 * (1 + i), 1e5, 1e5 * (1 + i), 1e3) for i in range(8)] + [(8 * q, 8e5, 8e5, 6e5, 7e5, 1e3)]
+    assert G.chute(brutal)["chute"] == "brutale" and G.chute(lent)["chute"] == "lente"
+    assert G.chute(tient)["chute"] == "aucune" and G.chute([]) is None
+    # Dans le réseau d'un dev : −99 % après 2 M$, rug seulement si la chute a été brutale
+    base_coin = coin("x", 2_000_000, 3 * 3600, 3_000, age_h=200, complete=True)
+    assert network.classify_project(base_coin).verdict == "rug"                          # vitesse inconnue : prudence
+    assert network.classify_project({**base_coin, "chute": "brutale"}).verdict == "rug"
+    assert network.classify_project({**base_coin, "chute": "lente"}).verdict == "succès"
+    assert network.classify_project({**coin("y", 300_000, 3600, 900, age_h=200, complete=True),
+                                     "chute": "lente"}).verdict == "mort"
+
+
+def test_vitesse_de_chute_memorisee_et_mesuree_en_arriere_plan(tmp_path, monkeypatch):
+    db = DB(tmp_path / "r.db")
+    appels = []
+
+    async def chute_token(http, base, mint, fin=None):
+        appels.append(mint)
+        return {"pic": 2e6, "pic_ts": 0, "chute": "lente", "duree": 86400}
+
+    monkeypatch.setattr(network.geckoterminal, "chute_token", chute_token)
+    projets = [network.classify_project(coin(m, 2_000_000, 3600, 3_000, age_h=200, complete=True)) for m in ("a", "b")]
+    db.put("chute:a", '{"pic": 2e6, "pic_ts": 0, "chute": "brutale", "duree": 900}')
+
+    async def go():
+        await network._chutes(None, db, projets, budget=0)   # dans une alerte : mémoire seulement
+        v = [p.verdict for p in projets]
+        await asyncio.sleep(0)                               # la mesure manquante part en arrière-plan
+        return v
+    assert asyncio.run(go()) == ["rug", "rug"] and appels == ["b"]
+    projets = [network.classify_project(coin("b", 2_000_000, 3600, 3_000, age_h=200, complete=True))]
+    asyncio.run(network._chutes(None, db, projets, budget=6))
+    assert projets[0].verdict == "succès"
     db.close()

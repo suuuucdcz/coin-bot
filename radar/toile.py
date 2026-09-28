@@ -9,9 +9,11 @@ que ce qui compte, avec des RPC publics gratuits, et la base grandit d'elle-mêm
   2. son premier financeur (même règle anti-leurre que le traceur) ; un relais (neuf, 5 tx au plus) est remonté ;
      le premier financeur qui n'est ni un relais ni un wallet neuf est la « racine » (bank de l'opérateur, ou
      exchange) ;
-  3. 24 h puis 72 h après la création, DexScreener dit si le token a tenu (market cap ≥ 50 k$ aux deux mesures) :
-     un succès pour sa racine. Vu en vrai : les faux fonds du réseau Reserve tiennent souvent plus de 24 h à
-     plusieurs M$ (VSOF 30 h, SAI 45 h) avant de tomber à 2 k$ ;
+  3. 6 h après la création, le token est jugé sur son historique de prix (GeckoTerminal) : succès s'il a dépassé
+     100 k$ sans chute brutale, même s'il redescend doucement ensuite (un coin qui s'éteint n'est pas un rug) ; rug
+     s'il est tombé de plus de 50 % à moins de 10 % de son plus haut en moins d'une heure (mesuré : 15 à 30 min).
+     Chaque succès est revu à 24 h et 72 h : les faux fonds du réseau Reserve tiennent parfois 1 à 2 jours avant
+     d'être vidés ; un rug tardif déclasse le financeur ;
   4. une racine qui a financé au moins 2 créateurs à succès, avec au moins 25 % de réussite, qui n'est pas un
      service (exchange, bridge : trop de tx ou trop de clients), et dont le réseau n'a pas de rugs (même analyse
      que la découverte, quelques crédits Helius par promotion) entre dans la watchlist comme « bank à succès » :
@@ -32,7 +34,7 @@ from .alerte import Alert
 from .analysis import network
 from .analysis.tracer import HOT_WINDOW_S, scan_funding
 from .confiance import TRUSTED
-from .sources import dexscreener
+from .sources import dexscreener, geckoterminal
 from .sources.helius import LAMPORTS, RpcError, SolanaRPC, account_keys, in_background
 from .telegram import esc
 
@@ -47,15 +49,17 @@ SIG_MAX = 1000               # 1 000 tx en moins de 2 jours : bot, usine à toke
 RELAY_MAX_TX = 5
 MAX_HOPS = 3
 LIENS = ("neuf", "relais")   # statuts qui portent un lien sûr
-SUCCES_MC = 50_000           # market cap 24 h ET 72 h après la création
+SUCCES_PIC = 100_000         # un succès a dépassé 100 k$ (courbe pump.fun terminée et au-delà)…
+CANDIDAT_MC = 30_000         # … candidats : migrés, ou encore ≥ 30 k$ au moment du jugement
 MIN_SUCCES = 2               # créateurs différents
 MIN_TAUX = 0.25
 MAX_CREATEURS_7J = 50        # au-delà : un service qui finance ses clients, pas une équipe
 PROMOTIONS_PAR_JOUR = 20
-MESURE_APRES_S = 86400
-TENUE_APRES_S = 3 * 86400
-MESURE_ABANDON_S = 3 * 86400     # DexScreener muet trop longtemps après l'heure de la mesure : compté 0
-MESURES_PAR_TOUR = 600
+JUGE_APRES_S = 6 * 3600      # premier jugement 6 h après la création
+REVUES_S = (86400, 3 * 86400)  # un succès est revu à 24 h et à 72 h (rug tardif ?)
+ABANDON_S = 3 * 86400        # sans données trois jours après : raté
+JUGES_PAR_TOUR = 600
+BOUGIES_PAR_TOUR = 40        # historiques de prix lus par tour (GeckoTerminal : 30 requêtes / min)
 LOT_DEXSCREENER = 20
 TOUR_S = 20 * 60
 CACHE_JOURS = 7              # wallets sans lien (réutilisés, très actifs) : simple cache
@@ -204,47 +208,97 @@ class Toile:
             cur = w["source"]
         return hops or None
 
-    # --- 3. succès mesurés à 24 h puis 72 h ---------------------------------------------------------------
-    async def _mesures(self, rows, delai_s: int, now: float) -> dict[str, float]:
-        mesures: dict[str, float] = {}
+    # --- 3. jugement des tokens : a-t-il marché, et comment est-il retombé ? -------------------------------
+    async def _verdict(self, mint: str) -> tuple[str, float | None] | None:
+        """(verdict, plus haut) d'après l'historique de prix ; None sans données (réessayé)."""
+        r = await geckoterminal.chute_token(self.p.http, self.db, mint)
+        if r is None:
+            return None
+        if r["pic"] < SUCCES_PIC:
+            return "raté", r["pic"]
+        return ("rug" if r["chute"] == "brutale" else "succès"), r["pic"]
+
+    async def juger(self, now: float | None = None) -> int:
+        """Premier jugement 6 h après la création, puis revue des succès à 24 h et 72 h. Renvoie le nombre de jugements."""
+        now = now or time.time()
+        if self.p.http is None:
+            return 0
+        n = bougies = 0
+        rows = self.db.toile_a_juger(int(now - JUGE_APRES_S), JUGES_PAR_TOUR)
+        candidats = []
         for i in range(0, len(rows), LOT_DEXSCREENER):
             lot = rows[i:i + LOT_DEXSCREENER]
             marches = await dexscreener.markets(self.p.http, [r["mint"] for r in lot])
             if not marches:
-                # DexScreener muet sur tout un lot : panne probable, on réessaie au prochain tour (abandon à 3 jours)
-                mesures.update({r["mint"]: 0.0 for r in lot if now - r["ts"] > delai_s + MESURE_ABANDON_S})
+                # DexScreener muet sur tout un lot : panne probable, on réessaie (abandon après 3 jours)
+                for r in lot:
+                    if now - r["ts"] > ABANDON_S:
+                        self.db.toile_juger(r["mint"], "raté", None, int(now))
+                        n += 1
                 continue
-            mesures.update({r["mint"]: float((marches.get(r["mint"]) or {}).get("mc") or 0) for r in lot})
-        return mesures
+            for r in lot:
+                m = marches.get(r["mint"]) or {}
+                if m.get("dex") not in (None, "pumpfun") or (m.get("mc") or 0) >= CANDIDAT_MC:
+                    candidats.append(r)           # a quitté la courbe pump.fun, ou vaut encore quelque chose
+                else:
+                    self.db.toile_juger(r["mint"], "raté", None, int(now))
+                    n += 1
+        nouveaux = []
+        for r in candidats:
+            if bougies >= BOUGIES_PAR_TOUR:
+                break                             # la suite au prochain tour
+            bougies += 1
+            v = await self._verdict(r["mint"])
+            if v is None:
+                if now - r["ts"] > ABANDON_S:
+                    self.db.toile_juger(r["mint"], "raté", None, int(now))
+                    n += 1
+                continue
+            self.db.toile_juger(r["mint"], v[0], v[1], int(now))
+            n += 1
+            if v[0] == "succès":
+                nouveaux.append(r)
+        # Revue des succès (24 h, 72 h) : un rug tardif les déclasse, et déclasse le financeur s'il avait été promu
+        for r in self.db.toile_a_revoir(int(now), REVUES_S, max(0, BOUGIES_PAR_TOUR - bougies)):
+            v = await self._verdict(r["mint"])
+            if v is None:
+                continue
+            self.db.toile_juger(r["mint"], v[0], v[1], int(now))
+            if v[0] == "rug":
+                await self.declasser(r)
+        self.stats["juges"] += n
+        for r in nouveaux:
+            self.stats["succes"] += 1
+            w = self.db.toile_wallet(r["creator"])
+            if w is not None and w["racine"]:
+                await self.examiner(w["racine"])
+        return n
 
-    async def mesurer(self, now: float | None = None) -> int:
-        """Mesure à 24 h (tous les tokens), puis à 72 h (ceux qui tenaient à 24 h). Renvoie le nombre de mesures."""
-        now = now or time.time()
-        if self.p.http is None:
-            return 0
-        rows = self.db.toile_a_mesurer(int(now - MESURE_APRES_S), MESURES_PAR_TOUR)
-        a24 = await self._mesures(rows, MESURE_APRES_S, now) if rows else {}
-        self.db.toile_set_mc(a24)
-        self.db.toile_echecs_24h(SUCCES_MC)
-        rows = self.db.toile_a_remesurer(int(now - TENUE_APRES_S), SUCCES_MC, MESURES_PAR_TOUR)
-        a72 = await self._mesures(rows, TENUE_APRES_S, now) if rows else {}
-        self.db.toile_set_mc(a72, "mc_72h")
-        self.stats["mesures"] += len(a24) + len(a72)
-        for r in rows:
-            if a72.get(r["mint"], 0) >= SUCCES_MC:
-                self.stats["succes"] += 1
-                w = self.db.toile_wallet(r["creator"])
-                if w is not None and w["racine"]:
-                    await self.examiner(w["racine"])
-        return len(a24) + len(a72)
+    async def declasser(self, token) -> None:
+        """Un succès s'est effondré d'un coup : son financeur, s'il avait été promu, passe en réseau à rugs."""
+        w = self.db.toile_wallet(token["creator"])
+        racine = w["racine"] if w is not None else None
+        if not racine or self.db.get(f"toile_promu:{racine}") in (None, "0"):
+            return
+        label = f"TOILE_{racine[:4]}"
+        sym = token["symbol"] or "?"
+        self.db.set_wallet_role(racine, label, "reseau-rugs",
+                                f"financeur déclassé par la toile : rug brutal de ${sym} après un succès", 1)
+        self.db.put(f"toile_promu:{racine}", "0")
+        log.warning("Toile : %s déclassé (rug brutal de $%s)", label, sym)
+        self.p.emit(Alert(f"toile_declasse:{racine}", "discovery",
+                          f"⛔ <b>TOILE : {esc(label)} déclassé</b>\n<code>{racine}</code>\n"
+                          f"${esc(sym)}, lancé par un de ses wallets neufs, vient de s'effondrer d'un coup (rug). "
+                          "Ses prochains wallets seront marqués ⛔.", wallet=racine))
 
     # --- 4. financeurs à succès -------------------------------------------------------------------------
     def stats_racine(self, racine: str) -> dict:
-        return self.db.toile_stats(racine, SUCCES_MC, int(time.time() - 7 * 86400))
+        return self.db.toile_stats(racine, int(time.time() - 7 * 86400))
 
     @staticmethod
     def qualifie(st: dict) -> bool:
-        return (st["succes"] >= MIN_SUCCES and st["succes"] >= MIN_TAUX * st["juges"]
+        # Aucun rug brutal parmi ses wallets neufs : un opérateur qui vide ses tokens n'est jamais « à succès »
+        return (st["succes"] >= MIN_SUCCES and st["succes"] >= MIN_TAUX * st["juges"] and not st["rugs"]
                 and st["recents"] <= MAX_CREATEURS_7J)
 
     def service_connu(self, adresse: str) -> bool:
@@ -290,11 +344,11 @@ class Toile:
             return False
         if await self.est_service(racine):
             return False
-        ex = self.db.toile_succes(racine, SUCCES_MC)
+        ex = self.db.toile_succes(racine)
         if await self.reseau_a_rugs(racine, ex):
             return False
         role = (f"bank à succès (toile : {st['succes']} créateurs neufs sur {st['juges']} au-dessus de "
-                f"{A.usd(SUCCES_MC)} après 72 h : " + ", ".join(f"${r['symbol'] or '?'} {A.usd(r['mc_72h'])}" for r in ex)
+                f"{A.usd(SUCCES_PIC)} sans rug : " + ", ".join(f"${r['symbol'] or '?'} {A.usd(r['pic'])}" for r in ex)
                 + ")")
         label = f"TOILE_{racine[:4]}"
         if row is not None:
@@ -305,9 +359,9 @@ class Toile:
         self.stats["promus"] += 1
         log.info("Toile : %s promu (%d succès sur %d créateurs mesurés)", label, st["succes"], st["juges"])
         lignes = [f"🕸️ <b>TOILE : nouveau financeur à succès suivi</b> ({esc(label)})", f"<code>{racine}</code>",
-                  f"{st['succes']} des {st['juges']} wallets neufs qu'il a financés ont lancé un token encore au-dessus "
-                  f"de {A.usd(SUCCES_MC)} 24 h ET 72 h après (réseau vérifié : pas de rugs) :"]
-        lignes += [f"• ${esc(r['symbol'] or '?')} {A.usd(r['mc_72h'])} · <code>{r['mint']}</code>" for r in ex]
+                  f"{st['succes']} des {st['juges']} wallets neufs qu'il a financés ont lancé un token monté au-dessus "
+                  f"de {A.usd(SUCCES_PIC)} sans rug brutal (réseau vérifié) :"]
+        lignes += [f"• ${esc(r['symbol'] or '?')} plus haut {A.usd(r['pic'])} · <code>{r['mint']}</code>" for r in ex]
         lignes.append("<i>Ses prochains wallets neufs seront signalés dès le financement, leur token dès la création.</i>")
         self.p.emit(Alert(f"toile:{racine}", "discovery", "\n".join(lignes), wallet=racine))
         return True
@@ -319,7 +373,7 @@ class Toile:
         if not succes:
             return True
         try:
-            rep = await in_background(network.quick(self.p, succes[0]["creator"]))
+            rep = await in_background(network.quick(self.p, succes[0]["creator"], network.CHUTES_PAR_ANALYSE))
         except Exception as e:
             log.info("Toile : réseau de %s non vérifiable (%s), promotion reportée", racine[:6], e)
             return True   # dans le doute, pas de promotion (réessayé au prochain succès)
@@ -371,12 +425,12 @@ class Toile:
 
     # --- suivi ------------------------------------------------------------------------------------------
     def status_line(self) -> str:
-        n = self.db.toile_resume(SUCCES_MC)
+        n = self.db.toile_resume()
         s = self.stats
         promus = len([1 for _k, v in self.db.settings_like("toile_promu:") if v and v != "0"])
         sante = " · ⚠️ RPC public en difficulté" if self.pub.recent_failures() + self.arc.recent_failures() >= 5 else ""
         return (f"🕸️ Toile : {n.get('neuf', 0)} wallets neufs reliés à {n['financeurs']} financeurs · "
-                f"{n['succes']} succès sur {n['mesures']} tokens mesurés à 24 h · {promus} financeurs promus · "
+                f"{n['succes']} succès et {n['rugs']} rugs sur {n['juges']} tokens jugés · {promus} financeurs promus · "
                 f"{s['alertes']} alertes · file {len(self.file)}"
                 + (f" · {s['non_traites']} non traités" if s["non_traites"] else "") + sante)
 
@@ -385,12 +439,12 @@ class Toile:
         while True:
             await asyncio.sleep(TOUR_S)
             try:
-                await self.mesurer()
+                await self.juger()
             except Exception:
-                log.exception("Toile : mesure à 24 h en échec")
+                log.exception("Toile : jugement des tokens en échec")
             if time.time() - menage > 86400:
                 menage = time.time()
-                n = self.db.toile_purge(int(menage - CACHE_JOURS * 86400), int(menage - GARDE_JOURS * 86400), SUCCES_MC)
+                n = self.db.toile_purge(int(menage - CACHE_JOURS * 86400), int(menage - GARDE_JOURS * 86400))
                 log.info("Toile : ménage, %d lignes anciennes retirées", n)
 
     def taches(self) -> list:
