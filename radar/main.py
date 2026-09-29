@@ -26,6 +26,7 @@ from .confiance import watch_priority
 from .results import Results
 from .lancements import LaunchWatch
 from .smart import SmartMoney
+from .decollage import Decollage
 from .toile import Toile
 from .sources import pumpportal
 from .sources.helius import LogsWatcherPool, RpcError, SolanaRPC, in_background, notable_logs
@@ -130,6 +131,7 @@ async def amain() -> int:
         pipeline.lancements = LaunchWatch(pipeline)   # remontée des lancements qui décollent (🔗)
         if cfg.toile_enabled:
             pipeline.toile = Toile(pipeline)           # qui finance qui, pour chaque token pump.fun (RPC publics)
+        pipeline.decollage = Decollage(pipeline)       # 🚀 décollages : photo, section, mesure
 
         async def on_new_token(msg: dict) -> None:
             await pipeline.on_pumpportal_create(msg)
@@ -292,6 +294,8 @@ async def amain() -> int:
                 if tours % 4 == 0 and pipeline.toile is not None:
                     log.info("%s", pipeline.toile.status_line())
                 if tours % 4 == 0:
+                    log.info("%s", pipeline.decollage.status_line())
+                if tours % 4 == 0:
                     log.info("RPC par méthode depuis le démarrage : %s",
                              ", ".join(f"{m} {n}" for m, n in rpc.by_method.most_common(8)))
                 # Projection sur 30 jours à partir du début réel du comptage (pas du 1er du mois)
@@ -429,6 +433,7 @@ async def amain() -> int:
             tasks.append(in_background(discovery_loop()))
         if pipeline.toile is not None:
             tasks += pipeline.toile.taches()
+        tasks.append(in_background(pipeline.decollage.boucle()))
         try:
             await asyncio.gather(*tasks)
         finally:

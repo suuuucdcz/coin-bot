@@ -59,7 +59,8 @@ class LaunchWatch:
         if not creator or not mint or creator in self.p.watched:
             return   # un créateur déjà suivi est traité en direct par le pipeline
         self.stats["vus"] += 1
-        t = {"mint": mint, "creator": creator, "ts": time.time(), "symbol": msg.get("symbol"), "name": msg.get("name")}
+        t = {"mint": mint, "creator": creator, "ts": time.time(), "symbol": msg.get("symbol"), "name": msg.get("name"),
+             "achat_dev": msg.get("solAmount")}   # SOL misés par le dev à la création (flux PumpPortal)
         connu = self.connu(creator)
         if connu is not None:
             # Créateur déjà connu de la base (sorti de la watchlist, ou jamais suivi mais relié par un lien) :
@@ -91,6 +92,11 @@ class LaunchWatch:
             del self.pending[t["mint"]]
             if (m.get("mc") or 0) >= TRACTION_MC and (m.get("txns24h") or 0) >= TRACTION_TXNS:
                 decollent.append({**t, "mc": m["mc"], "txns": m["txns24h"]})
+                if self.p.decollage is not None:
+                    try:
+                        await self.p.decollage.observer(t, m, now)   # photo (mesure) et section 🚀
+                    except Exception:
+                        log.exception("Décollage de %s : photo en échec", t["mint"][:6])
         self.stats["decollent"] += len(decollent)
         trouves = []
         for t in sorted(decollent, key=lambda t: t["mc"], reverse=True):

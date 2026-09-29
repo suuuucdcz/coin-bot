@@ -27,7 +27,7 @@ TRACKED = {"top": "‼️ À ne pas rater", "create": "🔴 Créations", "buy": 
            "cluster": "🎯 Cluster / dev qui entre", "smart": "🧠 Smart money",
            "relance": "🔗 Wallet neuf d'un dev connu",
            "lp_add": "🟢 Trading ouvert", "supply_in": "🟣 Supply reçue",
-           "annonce": "📆 Coins annoncés lancés"}
+           "annonce": "📆 Coins annoncés lancés", "decolle": "🚀 Décolle proprement"}
 CHECK_EVERY_S = 600          # une mesure toutes les 10 min pendant 24 h
 FOLLOW_S = 24 * 3600
 PUMP_PER_ROUND = 25          # fiches pump.fun lues par tour (plus haut entre deux mesures)

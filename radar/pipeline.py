@@ -50,6 +50,7 @@ class Pipeline(TopMixin, EvenementsMixin):
         self.results = None            # suivi des résultats (radar/results.py), branché par main.py
         self.lancements = None         # remontée des lancements qui décollent (radar/lancements.py)
         self.toile = None              # base « qui finance qui » tissée avec des RPC publics (radar/toile.py)
+        self.decollage = None          # 🚀 décollages : photo, section, mesure (radar/decollage.py)
         self.mints: set[str] = set()   # adresses de la watchlist qui sont des contrats de token
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._burst: dict[str, list[float]] = defaultdict(list)

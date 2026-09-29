@@ -140,6 +140,20 @@ CREATE TABLE IF NOT EXISTS toile_tokens (    -- tokens pump.fun créés par les 
     revu    INTEGER        -- dernier contrôle (un succès est revu à 24 h et 72 h : rug tardif ?)
 );
 CREATE INDEX IF NOT EXISTS toile_createur ON toile_tokens(creator);
+CREATE TABLE IF NOT EXISTS decollages (      -- tokens qui décollent : photo à 3-10 min et ce qu'ils deviennent (decollage.py)
+    mint TEXT PRIMARY KEY, creator TEXT, symbol TEXT, cree INTEGER, photo INTEGER, age_s INTEGER,
+    mc REAL, liq REAL, txns INTEGER, achats5 INTEGER, ventes5 INTEGER, vol5 REAL, var5 REAL,
+    achat_dev REAL,        -- SOL misés par le dev à la création
+    statut TEXT,           -- créateur dans la toile : neuf, relais, reutilise, actif (NULL = pas encore analysé)
+    racine TEXT, racine_succes INTEGER, racine_rugs INTEGER,
+    lien TEXT,             -- rug / bon : créateur ou maillon déjà connu du radar
+    tokens_24h INTEGER, top10 REAL, dev_pct REAL, ferme INTEGER,
+    alerte INTEGER,        -- 1 = publié dans la section 🚀
+    refus TEXT,            -- sinon, pourquoi
+    pic REAL, chute TEXT, mc_24h REAL,
+    issue TEXT             -- 24 h après : gros succès, succès, rug, mort (NULL = pas encore jugé)
+);
+CREATE INDEX IF NOT EXISTS decollages_a_juger ON decollages(photo) WHERE issue IS NULL;
 """
 
 
@@ -458,6 +472,38 @@ class DB:
         self.conn.commit()
         return n
 
+    def toile_tokens_24h(self, creator: str, depuis: int) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM toile_tokens WHERE creator = ? AND ts >= ?",
+                                 (creator, depuis)).fetchone()[0]
+
+    # --- décollages (radar/decollage.py) ------------------------------------------------------------
+    DECOLLAGE_COLS = ("mint", "creator", "symbol", "cree", "photo", "age_s", "mc", "liq", "txns", "achats5", "ventes5",
+                      "vol5", "var5", "achat_dev", "statut", "racine", "racine_succes", "racine_rugs", "lien",
+                      "tokens_24h", "top10", "dev_pct", "ferme", "alerte", "refus")
+
+    def decollage_add(self, ph: dict) -> None:
+        cols = self.DECOLLAGE_COLS
+        self.conn.execute(f"INSERT OR IGNORE INTO decollages({', '.join(cols)}) VALUES({', '.join('?' * len(cols))})",
+                          [ph.get(c) for c in cols])
+        self.conn.commit()
+
+    def decollage_a_juger(self, avant: int, limit: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM decollages WHERE issue IS NULL AND photo <= ? ORDER BY photo LIMIT ?",
+                                 (avant, limit)).fetchall()
+
+    def decollage_juger(self, mint: str, pic: float | None, chute: str | None, mc: float | None, issue: str) -> None:
+        self.conn.execute("UPDATE decollages SET pic = ?, chute = ?, mc_24h = ?, issue = ? WHERE mint = ?",
+                          (pic, chute, mc, issue, mint))
+        self.conn.commit()
+
+    def decollages_depuis(self, depuis: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM decollages WHERE photo >= ?", (depuis,)).fetchall()
+
+    def decollages_compte(self) -> dict:
+        r = self.conn.execute("SELECT COUNT(*), COUNT(issue), SUM(issue IN ('succès', 'gros succès')), SUM(alerte) "
+                              "FROM decollages").fetchone()
+        return {"photos": r[0], "juges": r[1], "succes": r[2] or 0, "alertes": r[3] or 0}
+
     def set_wallet_role(self, address: str, label: str, grp: str, role: str, depth: int) -> None:
         """Nouvelle identité d'un wallet déjà en base (ex. : un financeur promu par la toile)."""
         self.conn.execute("UPDATE wallets SET label=?, grp=?, role=?, depth=? WHERE address=?",
@@ -471,7 +517,8 @@ class DB:
     RESET_TABLES = ("alerts", "results", "announcements", "tokens", "tweets_seen", "networks")
     RESET_KEYS = ("ann_seen:", "buys:", "creates:", "grp_tokens:", "daily_report", "discovery_last")
     # Avec tout=True, en plus : ce que le radar a APPRIS (wallets ajoutés, liens, étiquettes, classements)
-    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts", "smart_hits", "toile_wallets", "toile_tokens")
+    LEARNED_TABLES = ("links", "labels", "wallet_state", "x_accounts", "smart_hits", "toile_wallets", "toile_tokens",
+                      "decollages")
     LEARNED_KEYS = ("farm:", "sniper:", "factory:", "noisy:", "disc:", "disc_up:", "lance:", "smart_vu:", "tempete:",
                     "toile_promu:", "toile_service:")
 

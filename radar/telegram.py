@@ -43,6 +43,7 @@ TOPICS = {
     "scams":    ("🏴‍☠️", "Arnaques repérées", 16749490),
     "fakes":    ("🎭", "Faux coins du jour", 9367192),
     "resultats": ("📈", "Résultats des alertes", 9367192),
+    "decolle":  ("🚀", "Décolle proprement", 16766590),
     "system":   ("🤖", "État du radar", 7322096),
 }
 # Ce que contient chaque section (épinglé en tête de la section, ou en bas de son message épinglé)
@@ -75,6 +76,15 @@ SECTION_INFO = {
         "Tout ce que font les opérateurs connus pour rug : cluster Reserve (faux fonds souverains), fermes de "
         "bots, réseaux à rugs, organisateurs de faux coins.\n"
         "<b>À signaler, jamais à acheter.</b> Utile pour savoir qui éviter et reconnaître leurs prochains tokens."),
+    "decolle": (
+        "🚀 <b>DÉCOLLE PROPREMENT</b> (section en test)\n"
+        "Tokens de devs <b>inconnus</b> qui décollent 3 à 10 min après leur création, avec une structure saine : "
+        "pas de lien avec un réseau à rugs, pas de ferme de wallets, dev raisonnable (mise de départ, part gardée), "
+        "vrai volume et plus d'achats que de ventes.\n"
+        "<b>Pas avant les bots</b> : un décollage déjà en cours, trié. Les coins qui marchent font leur plus haut "
+        "des heures ou des jours plus tard ; le vrai travail est le tri.\n"
+        "Chaque token qui décolle est mesuré en silence 24 h plus tard : les filtres se règlent sur ces chiffres. "
+        "Chaque alerte est suivie dans 📈 Résultats."),
     "agenda": ("<i>Section 📆 : coins annoncés sur X avant leur lancement. Une fiche par coin, mise à jour en "
                "direct ; les réponses sous une fiche = son historique (CA publié, dev trouvé, trading ouvert). "
                "👑 = compte officiel probable, 🟢🟡🔴 = fiabilité du compte.</i>"),
@@ -296,7 +306,7 @@ class Telegram:
         """Épingle en tête de chaque section ce qu'elle contient (une fois par version du texte)."""
         if not self.forum:
             return
-        for key in ("onchain", "clusters", "devs", "scams", "resultats"):
+        for key in ("onchain", "clusters", "devs", "scams", "resultats", "decolle"):
             if key not in self.threads:
                 continue
             cle = f"header:{self.place(key)}"

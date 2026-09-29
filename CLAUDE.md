@@ -51,6 +51,7 @@ radar/
   smart.py           # smart money : gros détenteurs de plusieurs vrais succès -> alerte 🧠 quand ils entrent ensemble
   lancements.py      # tokens pump.fun qui décollent -> argent du créateur remonté -> wallet neuf d'un dev connu ?
   toile.py           # « qui finance qui » pour CHAQUE token pump.fun (RPC publics) -> financeurs à succès suivis
+  decollage.py       # 🚀 tokens qui décollent proprement (devs inconnus) + mesure silencieuse de ce qui marche
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ
@@ -109,6 +110,11 @@ Règles ajoutées à l'usage :
 - **Découverte** : elle regarde des tokens de 1 à 7 jours pour trouver des DEVS ; ses listes ne partent plus sur
   Telegram (vues « un jour après », inutiles pour entrer), seulement dans le journal. Confiance « prouvé » seulement
   pour un succès vérifié sur DexScreener ; `python -m radar.discovery --revalider` réévalue les anciennes découvertes.
+- **Décolle proprement (`decollage.py`, section 🚀, en test)** : chaque token qui décolle (veille des lancements, 3-10
+  min) est photographié en base (`decollages`) et jugé 24 h après sur son historique de prix ; `python -m radar.decollage`
+  donne le bilan (quels indices annonçaient les succès). Section : filtres prudents (`SEUILS`, à régler sur le bilan) +
+  structure des détenteurs (seul appel Helius, candidats seulement), 6 alertes / h au plus. Pas « avant les bots » :
+  les coins qui marchent font leur plus haut des heures ou des jours plus tard, le travail est le tri.
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 
