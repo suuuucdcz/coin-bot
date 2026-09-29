@@ -23,6 +23,8 @@ PAUSE_S = 2.2
 BOUGIE_S = 900
 CHUTE_BRUTALE_S = 3600       # de ≥ 50 % à ≤ 10 % du plus haut en 1 h au plus = rug (mesuré : 15 à 30 min)
 PUMP_SUPPLY = 1_000_000_000
+VOLUME_MIN = 1_000           # une bougie sans vrais échanges (moins de 1 000 $) ne fait ni le plus haut ni la chute
+PIC_MAX = 5_000_000_000      # au-delà : données absurdes
 
 _verrou = asyncio.Lock()
 _dernier = 0.0
@@ -70,20 +72,35 @@ async def bougies(http: aiohttp.ClientSession, mint: str, fin: int | None = None
     return [out[k] for k in sorted(out)]
 
 
+def _corps(x: tuple) -> float:
+    """Haut du corps de la bougie (ouverture / clôture), sans la mèche."""
+    return max(x[1], x[4])
+
+
 def chute(b: list[tuple]) -> dict | None:
     """Plus haut et vitesse de la chute qui a suivi. None sans données.
 
-    brutale : de ≥ 50 % du plus haut à ≤ 10 % en CHUTE_BRUTALE_S au plus (rug) ; lente : ≤ 10 % atteint plus
-    lentement (le coin a vécu puis s'est éteint) ; aucune : jamais redescendu sous 10 % du plus haut."""
-    if not b:
+    brutale : de ≥ 50 % du plus haut à ≤ 10 % en CHUTE_BRUTALE_S au plus, sans jamais remonter (rug) ; lente : ≤ 10 %
+    atteint plus lentement (le coin a vécu puis s'est éteint) ; aucune : jamais durablement sous 10 % du plus haut.
+    Plus haut et chute se lisent sur le corps des bougies échangées (VOLUME_MIN) : vu en vrai (29/09), des mèches
+    sur des pools vides donnaient des plus hauts de 8 000 M$ et de faux rugs (un bon coin, $COLLECT, noté rug)."""
+    reelles = [x for x in b if x[5] >= VOLUME_MIN]
+    if not reelles:
         return None
-    i = max(range(len(b)), key=lambda k: b[k][2])
-    pic_ts, pic = b[i][0], b[i][2]
-    apres = b[i:]
-    t10 = next((x[0] for x in apres if x[3] <= 0.10 * pic), None)
+    i = max(range(len(reelles)), key=lambda k: _corps(reelles[k]))
+    pic_ts, pic = reelles[i][0], _corps(reelles[i])
+    if pic > PIC_MAX:
+        return None   # valeur absurde : données inutilisables
+    apres = [x for x in reelles if x[0] >= pic_ts]
+    t10 = None
+    for k, x in enumerate(apres):
+        # clôture sous 10 % du plus haut, et plus jamais au-dessus de 50 % ensuite (sinon : un creux, pas une chute)
+        if x[4] <= 0.10 * pic and all(y[4] < 0.5 * pic for y in apres[k + 1:]):
+            t10 = x[0]
+            break
     if t10 is None:
         return {"pic": pic, "pic_ts": pic_ts, "chute": "aucune", "duree": None}
-    t50 = max(x[0] for x in apres if x[0] <= t10 and x[2] >= 0.5 * pic)
+    t50 = max(x[0] for x in apres if x[0] <= t10 and _corps(x) >= 0.5 * pic)
     duree = t10 - t50 + BOUGIE_S
     return {"pic": pic, "pic_ts": pic_ts, "chute": "brutale" if duree <= CHUTE_BRUTALE_S else "lente", "duree": duree}
 

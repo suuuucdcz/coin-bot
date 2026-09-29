@@ -69,7 +69,7 @@ def test_wallet_neuf_finance_par_le_bank_d_un_dev_connu(setup, monkeypatch):  # 
     db.add_wallet(DEV_WEPE, "DEV_WEPE", "découverte", "dev (découverte : $WEPE, MC 11.5 M$ vérifiée DexScreener)", 0, None)
     db.add_wallet(BANK, "BANK_WEPE", "découverte", "bank probable (a financé le dev de $WEPE)", 1, DEV_WEPE)
     db.deactivate([BANK])                                # sorti de la watchlist : connu quand même
-    p, w = _veille(db, tg, monkeypatch, {"MINTa": {"mc": 45_000, "txns24h": 180}})
+    p, w = _veille(db, tg, monkeypatch, {"MINTa": {"mc": 60_000, "txns24h": 180}})
     _token(w, "MINTa", 200)
     trouves = asyncio.run(w.check_once())
     assert len(trouves) == 1 and trouves[0]["label"] == "BANK_WEPE" and trouves[0]["genre"] == "bon"
@@ -92,7 +92,7 @@ def test_reseau_a_rugs_qui_relance_part_dans_arnaques(setup, monkeypatch):  # no
 def test_plafond_horaire_des_remontees(setup, monkeypatch):  # noqa: F811
     db, tg = setup
     monkeypatch.setattr(L, "TRACES_PER_HOUR", 2)
-    marches = {f"M{i}": {"mc": 20_000 + i, "txns24h": 60} for i in range(5)}
+    marches = {f"M{i}": {"mc": 60_000 + i, "txns24h": 60} for i in range(5)}
     p, w = _veille(db, tg, monkeypatch, marches)
     for i in range(5):
         _token(w, f"M{i}", 200, creator=f"INCONNU{i}" + "i" * 33)
@@ -114,3 +114,31 @@ def test_createur_deja_connu_alerte_des_la_creation(setup, monkeypatch):  # noqa
     asyncio.run(go())
     assert "MINTnouveau" not in w.pending and w.stats["trouves"] == 1
     assert any("NOUVEAU WALLET D'UN DEV CONNU" in t and "dès la création" in t for t in tg.sent)
+
+
+def test_remontee_helius_reservee_aux_vrais_decollages(setup, monkeypatch):  # noqa: F811
+    # Quota Helius (29/09) : 674 remontées pour 1 seul lien trouvé ; en dessous de 50 k$, plus de remontée par Helius
+    db, tg = setup
+    p, w = _veille(db, tg, monkeypatch, {"PETIT": {"mc": 25_000, "txns24h": 90}})
+    _token(w, "PETIT", 200, creator="INCONNUpetitiiiiiiiiiiiiiiiiiiiiiiiiiiiii")
+    asyncio.run(w.check_once())
+    assert w.stats["decollent"] == 1 and w.stats["remontes"] == 0
+
+
+def test_rafale_d_un_meme_operateur_regroupee(setup, monkeypatch):  # noqa: F811
+    # Vu en vrai (29/09) : un opérateur de faux coins a lancé 75 faux $BOB en 1 h 20, une alerte par token
+    db, tg = setup
+    db.add_wallet(BANK, "FAUX_BOB_3fsb", "faux-coins", "organisateur de faux coins", 1, None)
+    p, w = _veille(db, tg, monkeypatch, {})
+    base = {"genre": "rug", "wallet": BANK, "label": "FAUX_BOB_3fsb", "grp": "faux-coins", "role": "", "depth": 1,
+            "chaine": [], "mc": None, "txns": None, "symbol": "BOB"}
+
+    async def go():
+        for i in range(7):
+            await w.alerter({**base, "mint": f"BOB{i}" + "x" * 36, "creator": f"CRE{i}" + "c" * 36})
+    asyncio.run(go())
+    assert sum("UN RÉSEAU À RUGS RELANCE" in s for s in tg.sent) == 3 and w.stats["regroupes"] == 4
+    w.bilan_regroupes(time.time() + 20 * 60)
+    bilan = [s for s in tg.sent if "lancements de plus" in s]
+    assert len(bilan) == 1 and "4 lancements de plus" in bilan[0] and "$BOB ×4" in bilan[0]
+    assert not db.wallet("CRE6" + "c" * 36)          # les créateurs d'une rafale ne remplissent pas la watchlist

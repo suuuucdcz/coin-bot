@@ -350,3 +350,16 @@ def test_vitesse_de_chute_memorisee_et_mesuree_en_arriere_plan(tmp_path, monkeyp
     asyncio.run(network._chutes(None, db, projets, budget=6))
     assert projets[0].verdict == "succès"
     db.close()
+
+
+def test_meches_ignorees():
+    # Vu en vrai (29/09) : des mèches sur des pools vides donnaient des plus hauts de 8 000 M$ et de faux rugs
+    from radar.sources import geckoterminal as G
+    q = 900
+    vie = [(i * q, 1e6, 1.1e6, 0.9e6, 1e6, 50_000) for i in range(20)]
+    meche_haute = vie + [(20 * q, 1e6, 8e9, 1e6, 1e6, 12)]                 # 12 $ échangés : pas un vrai plus haut
+    meche_basse = vie + [(20 * q, 1e6, 1.05e6, 3_000, 1e6, 40_000)] + vie[:3]   # creux d'une bougie, clôture normale
+    creux = vie[:10] + [(10 * q, 1e6, 1e6, 80_000, 90_000, 30_000)] + [(11 * q, 90_000, 1e6, 90_000, 950_000, 60_000)]
+    assert G.chute(meche_haute)["pic"] < 2e6 and G.chute(meche_haute)["chute"] == "aucune"
+    assert G.chute(meche_basse)["chute"] == "aucune"
+    assert G.chute(creux)["chute"] == "aucune"                               # retombé puis remonté : pas un rug

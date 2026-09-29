@@ -89,7 +89,13 @@ Règles ajoutées à l'usage :
 - **Rug = chute BRUTALE** (`sources/geckoterminal.py`, bougies de 15 min) : de ≥ 50 % du plus haut à ≤ 10 % en moins
   d'1 h (mesuré sur 51 rugs : 15 à 30 min). Une descente lente n'est pas un rug (remarque de Maxence) : dans un réseau,
   un projet éteint doucement compte comme succès s'il a dépassé 1 M$. Vitesses mémorisées en base (`chute:<mint>`) ;
-  dans les alertes, mémoire seulement (mesures manquantes en arrière-plan).
+  dans les alertes, mémoire seulement (mesures manquantes en arrière-plan). Plus haut et chute lus sur le CORPS des
+  bougies avec ≥ 1 000 $ échangés, et une chute ne compte que si le prix ne remonte pas au-dessus de 50 % (vu le
+  29/09 : des mèches sur des pools vides donnaient des plus hauts de 8 000 M$ et de faux rugs).
+- **Rafales** (`lancements.py`) : au-delà de 3 relances par heure pour un même wallet connu, un seul bilan 15 min
+  après la dernière (vu : 75 faux $BOB en 1 h 20), sans analyse du token ni suivi des créateurs.
+- **Quota Helius, mesuré le 29/09 : 1,6 M/mois projeté** → remontées des lancements par Helius seulement au-dessus de
+  50 k$ et 8 par heure (la toile remonte les wallets neufs gratuitement) ; découverte toutes les 6 h, 20 devs.
 - **Réseau à rugs « en série »** (`network.py`) : au moins 2 projets vidés / rug, ou un faux succès ≥ 1 M$ vidé d'un
   coup. Un seul token raté ne suffit pas (vu en vrai : $goon classé à tort). Le leurre seul (test à 0,01 SOL) ne
   classe pas un dev. Les réseaux Reserve montent souvent ×5 à ×20 avant le rug : c'est leur fin qui les classe.

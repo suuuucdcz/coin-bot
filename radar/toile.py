@@ -258,6 +258,8 @@ class Toile:
             n += 1
             if v[0] == "succès":
                 nouveaux.append(r)
+            elif v[0] == "rug":
+                await self.declasser(r)   # un financeur déjà promu qui lance un rug est déclassé
         # Revue des succès (24 h, 72 h) : un rug tardif les déclasse, et déclasse le financeur s'il avait été promu
         for r in self.db.toile_a_revoir(int(now), REVUES_S, max(0, BOUGIES_PAR_TOUR - bougies)):
             v = await self._verdict(r["mint"])

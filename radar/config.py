@@ -157,7 +157,7 @@ def load() -> Config:
         x_quiet_hours=_hours("X_QUIET_HOURS", "3-8"),
         discovery_enabled=_bool("DISCOVERY_ENABLED", True),
         discovery_min_ath=_float("DISCOVERY_MIN_ATH", 500_000),
-        discovery_every_h=max(1, _int("DISCOVERY_EVERY_H", 3)),
+        discovery_every_h=max(1, _int("DISCOVERY_EVERY_H", 6)),
         typesafe_api_key=_env("TYPESAFE_API_KEY"),
         telegram_admins=[int(x) for x in re.findall(r"-?\d+", _env("TELEGRAM_ADMINS"))],
         # « À ne pas rater » : par défaut la conversation privée avec le 1er admin (ton compte Telegram)

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 
 from . import alerts as A
 from .alerte import Alert
@@ -34,7 +34,10 @@ CHECK_AFTER_S = 180          # regardé 3 min après la création…
 CHECK_UNTIL_S = 600          # … et jusqu'à 10 min (DexScreener met parfois une minute à l'indexer)
 TRACTION_MC = 15_000         # ≈ 3 fois la market cap de départ d'un token pump.fun
 TRACTION_TXNS = 40           # achats + ventes
-TRACES_PER_HOUR = 30         # plafond de remontées (quota Helius)
+TRACES_PER_HOUR = 8          # plafond de remontées par Helius (quota) : la toile remonte déjà les wallets neufs
+HELIUS_MC = 50_000           # remontée par Helius seulement pour un vrai décollage (vu : 1 relié sur 674 remontés)
+RELANCES_PAR_H = 3           # alertes par heure pour un même wallet connu ; au-delà, regroupées
+REGROUPE_S = 15 * 60         # bilan des alertes regroupées 15 min après la dernière
 MAX_HOPS = 3
 RELAY_MAX_TX = 5             # un financeur avec moins de 6 tx = relais : on remonte encore
 PENDING_MAX = 20_000
@@ -46,7 +49,9 @@ class LaunchWatch:
         self.p = pipeline
         self.pending: OrderedDict[str, dict] = OrderedDict()
         self._traces: deque[float] = deque()
-        self.stats = {"vus": 0, "decollent": 0, "remontes": 0, "trouves": 0}
+        self.stats = {"vus": 0, "decollent": 0, "remontes": 0, "trouves": 0, "regroupes": 0}
+        self._relances: dict[str, deque] = defaultdict(deque)          # wallet connu -> heures des alertes
+        self._regroupes: dict[str, dict] = {}                           # wallet connu -> tokens regroupés
 
     # --- 1. flux des nouveaux tokens ------------------------------------------------------------------
     def on_new_token(self, msg: dict) -> None:
@@ -92,6 +97,8 @@ class LaunchWatch:
             gratuit = self.p.toile is not None and self.p.toile.chaine(t["creator"]) is not None
             while self._traces and now - self._traces[0] > 3600:
                 self._traces.popleft()
+            if not gratuit and t["mc"] < HELIUS_MC:
+                continue   # remontée par Helius réservée aux vrais décollages (quota)
             if not gratuit and len(self._traces) >= TRACES_PER_HOUR:
                 log.info("Remontées : plafond horaire atteint (%d), %s non remonté", TRACES_PER_HOUR, t["mint"][:6])
                 continue
@@ -173,8 +180,45 @@ class LaunchWatch:
         return res
 
     # --- 4. alerte et suivi du créateur -------------------------------------------------------------------
+    def _en_rafale(self, r: dict, now: float | None = None) -> bool:
+        """Plus de RELANCES_PAR_H alertes en une heure pour le même wallet connu : regroupées. Vu en vrai (29/09) :
+        un opérateur de faux coins a lancé 75 faux $BOB en 1 h 20 depuis des wallets neufs, une alerte par token."""
+        now = now or time.time()
+        q = self._relances[r["wallet"]]
+        while q and now - q[0] > 3600:
+            q.popleft()
+        if len(q) < RELANCES_PAR_H:
+            q.append(now)
+            return False
+        g = self._regroupes.setdefault(r["wallet"], {"label": r["label"], "genre": r["genre"], "tokens": Counter(),
+                                                      "debut": now, "dernier": now})
+        g["tokens"][r.get("symbol") or "?"] += 1
+        g["dernier"] = now
+        self.stats["regroupes"] += 1
+        log.info("Relance regroupée (%s, rafale) : %s ($%s)", r["label"], r["mint"][:6], r.get("symbol"))
+        return True
+
+    def bilan_regroupes(self, now: float | None = None) -> None:
+        """Un seul message pour une rafale, 15 min après sa dernière relance."""
+        now = now or time.time()
+        for w, g in list(self._regroupes.items()):
+            if now - g["dernier"] < REGROUPE_S:
+                continue
+            del self._regroupes[w]
+            n = sum(g["tokens"].values())
+            detail = ", ".join(f"${esc(s)} ×{k}" if k > 1 else f"${esc(s)}" for s, k in g["tokens"].most_common(6))
+            rug = g["genre"] == "rug"
+            self.p.emit(Alert(f"rafale:{w}:{int(g['debut'])}", "relance",
+                              f"{'⛔' if rug else '🔁'} <b>{esc(g['label'] or A.short(w))} : {n} lancements de plus en "
+                              f"{max(1, int(g['dernier'] - g['debut']) // 60)} min</b> (alertes regroupées)\n"
+                              f"{detail}\n<code>{w}</code>"
+                              + (f"\n<i>{A.RUG_MARK} : ne pas les confondre avec le vrai token.</i>" if rug else ""),
+                              wallet=w))
+
     async def alerter(self, r: dict) -> None:
         p = self.p
+        if self._en_rafale(r):
+            return   # ni analyse du token (crédits Helius), ni suivi du créateur : un bilan partira
         info = await p._info(r["mint"], r["creator"])
         rug = r["genre"] == "rug"
         via = " ← ".join([f"{A.short(r['creator'])} (créateur)"]
@@ -202,12 +246,14 @@ class LaunchWatch:
     def status_line(self) -> str:
         s = self.stats
         return (f"🚀 Lancements pump.fun vus : {s['vus']} · qui décollent : {s['decollent']} · remontés : "
-                f"{s['remontes']} · reliés à un wallet connu : {s['trouves']}")
+                f"{s['remontes']} · reliés à un wallet connu : {s['trouves']}"
+                + (f" · {s['regroupes']} regroupés (rafales)" if s["regroupes"] else ""))
 
     async def loop(self) -> None:
         while True:
             await asyncio.sleep(60)
             try:
                 await self.check_once()
+                self.bilan_regroupes()
             except Exception:
                 log.exception("Lancements : passage en échec")
