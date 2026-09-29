@@ -361,7 +361,9 @@ class Pipeline(TopMixin, EvenementsMixin):
                 await self.cibles.on_tx(sig, tx)   # 🎯 tout ce que font les wallets des cibles, dans leur section
             except Exception:
                 log.exception("Cible : transaction %s non traitée", sig[:8])
-        events = analyze(tx, self.watched - self.mints)
+        # Les wallets discrets d'une cible (bundle de 50 wallets…) ne font pas d'alertes ordinaires : leur section suffit
+        discrets = self.cibles.discrets if self.cibles is not None else set()
+        events = analyze(tx, self.watched - self.mints - discrets)
         # Contrat suivi (CA publié avant le lancement, cas $ASH) : la 1re tx sur un AMM qui le
         # touche = pool créé / trading ouvert, même si le wallet qui le fait n'est pas suivi.
         keys = account_keys(tx)

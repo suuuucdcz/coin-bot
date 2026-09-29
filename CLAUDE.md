@@ -116,12 +116,22 @@ Règles ajoutées à l'usage :
   donne le bilan (quels indices annonçaient les succès). Section : filtres prudents (`SEUILS`, à régler sur le bilan) +
   structure des détenteurs (seul appel Helius, candidats seulement), 6 alertes / h au plus. Pas « avant les bots » :
   les coins qui marchent font leur plus haut des heures ou des jours plus tard, le travail est le tri.
-- **Cibles (`cible.py`, une section 🎯 par cible)** : `python -m radar.cible ajouter <NOM> <dev> [--wallets …]`
-  (pris en compte en moins d'1 min). Groupe `cible:<NOM>` : aucun filtre (bavard, sourdine, tempête, sniper, usine,
-  ferme, purge, plafond) ; chaque tx racontée ; tout wallet NEUF financé rejoint la cible (sans limite de profondeur).
+- **Cibles (`cible.py`, une section 🎯 par cible)** : `python -m radar.cible ajouter <NOM> <dev> [--wallets …]
+  [--discrets …]`, `retirer <NOM> <adresses>` (pris en compte en moins d'1 min). Groupe `cible:<NOM>` : aucun filtre
+  (bavard, sourdine, tempête, sniper, usine, ferme, purge, plafond) ; tout wallet NEUF financé rejoint la cible.
   Prochain coin repéré par 4 chemins dédoublonnés (clé `cible_crea:<mint>`) : création vue par Helius, flux pump.fun,
-  toile (créateur financé par un wallet de la cible), achat du même token par 2 wallets de la cible en 10 min ;
-  alerte aussi dans ‼️ et épinglée.
+  toile (créateur financé par un wallet de la cible), achat du même token JEUNE (< 30 min) par 2 wallets de la cible
+  en 10 min ; alerte dans ‼️, épinglée, **en tête de la file Telegram** (`urgent`).
+  Leçons de $PUMPINU (19/09, tout vérifié on-chain puis rejoué) : les wallets que le dev paie chaque jour (~0,09 SOL)
+  sont des tiers, pas les siens ; le vrai schéma = réserve → bank → lanceur (8 min avant), **mélangeur** parti du
+  lanceur (100+ wallets neufs, montants tous différents, 3 min avant) qui arme le dev et le bundle (10 virements
+  identiques chacun), puis création + **bundle de 50 wallets** dans la même seconde, revendu en 1 min. D'où :
+  wallets **discrets** (rôle « … suivi discret » : bundle, bots) jamais racontés un par un et hors des alertes
+  ordinaires ; **⚠️ ARMEMENT** (‼️, urgent) = 5 virements identiques reçus de wallets différents en 3 min, ou 8 wallets
+  neufs financés en 2 min ; au-delà de 3 envois vers des inconnus en 2 min (rafale), les destinataires sont vérifiés
+  en tâche de fond, suivis en discret **sans abonnement** (relus à +8 s, +30 s, +90 s, +4 min : sinon des centaines
+  de relais rempliraient la file des transactions juste avant la création), purgés vidés au bout de 2 h ;
+  📊 bilan du bundle à +2 et +10 min. Les virements de SOL sont lus dès 0,003 SOL (mélangeur à 0,0085 SOL).
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 

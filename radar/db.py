@@ -523,6 +523,11 @@ class DB:
         return {r["address"]: r["grp"][len("cible:"):] for r in
                 self.conn.execute("SELECT address, grp FROM wallets WHERE active = 1 AND grp LIKE 'cible:%'")}
 
+    def cible_discrets(self) -> set[str]:
+        """Wallets d'une cible suivis en silence (bundle, mélangeur, bots : rôle « … suivi discret »)."""
+        return {r["address"] for r in self.conn.execute(
+            "SELECT address FROM wallets WHERE active = 1 AND grp LIKE 'cible:%' AND role LIKE '%discret%'")}
+
     def set_wallet_role(self, address: str, label: str, grp: str, role: str, depth: int) -> None:
         """Nouvelle identité d'un wallet déjà en base (ex. : un financeur promu par la toile)."""
         self.conn.execute("UPDATE wallets SET label=?, grp=?, role=?, depth=? WHERE address=?",

@@ -32,6 +32,40 @@ LATENCY_MAX_S = 300  # au-delà : rattrapage après une coupure, pas compté dan
 SEND_RETRIES = 3    # nouveaux essais (espacés de RETRY_DELAY) si Telegram est injoignable
 RETRY_DELAY = 30
 
+
+class _DeuxFiles:
+    """Stockage de la file : les messages urgents d'abord, puis les autres dans l'ordre d'arrivée."""
+
+    def __init__(self):
+        self.urgents: deque = deque()
+        self.normaux: deque = deque()
+        self.prochain_urgent = False
+
+    def append(self, item) -> None:
+        (self.urgents if self.prochain_urgent else self.normaux).append(item)
+        self.prochain_urgent = False
+
+    def popleft(self):
+        return self.urgents.popleft() if self.urgents else self.normaux.popleft()
+
+    def __len__(self) -> int:
+        return len(self.urgents) + len(self.normaux)
+
+    def __iter__(self):
+        return iter([*self.urgents, *self.normaux])
+
+
+class FileAlertes(asyncio.Queue):
+    """File des messages Telegram : dans l'ordre d'arrivée, sauf les urgents (🎯 le coin d'une cible, son armement)
+    qui passent devant tout ce qui attend."""
+
+    def _init(self, maxsize):
+        self._queue = _DeuxFiles()
+
+    def put_urgent(self, item) -> None:
+        self._queue.prochain_urgent = True
+        self.put_nowait(item)
+
 # Compartiments : clé -> (icône, titre, couleur de secours). L'icône doit exister dans
 # getForumTopicIconStickers ; sinon l'emoji est mis devant le titre et la couleur sert d'icône.
 TOPICS = {
@@ -194,7 +228,7 @@ class Telegram:
         self.forum = False
         self.threads: dict[str, int] = {}
         self.extra_topics: dict[str, tuple[str, str, int]] = {}   # sections ajoutées en route (une par cible)
-        self.queue: asyncio.Queue = asyncio.Queue()
+        self.queue: FileAlertes = FileAlertes()
         self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
         # clé d'alerte -> identifiant du message envoyé (pour compléter une alerte rapide)
@@ -529,9 +563,10 @@ class Telegram:
 
     def enqueue(self, text: str, reply_markup: dict | None = None, key: str | None = None, kind: str = "",
                 topic: str | None = None, reply_to: int | None = None, on_sent=None,
-                event_ts: float | None = None) -> bool:
+                event_ts: float | None = None, urgent: bool = False) -> bool:
         """Met une alerte en file. Renvoie False si elle a déjà été envoyée (clé connue).
-        event_ts : heure de l'événement on-chain, pour mesurer le délai jusqu'à l'envoi."""
+        event_ts : heure de l'événement on-chain, pour mesurer le délai jusqu'à l'envoi.
+        urgent : passe devant tout ce qui attend (🎯 le coin d'une cible)."""
         if key and self.db and self.db.alert_already_sent(key):
             return False
         if key and self.db:
@@ -541,18 +576,20 @@ class Telegram:
             self._sent[key] = asyncio.get_running_loop().create_future()
             while len(self._sent) > 500:
                 self._sent.popitem(last=False)
-        self.queue.put_nowait((text, reply_markup, topic, reply_to, on_sent, key, 0, kind in QUIET_KINDS))
+        item = (text, reply_markup, topic, reply_to, on_sent, key, 0, kind in QUIET_KINDS)
+        self.queue.put_urgent(item) if urgent else self.queue.put_nowait(item)
         return True
 
     def enqueue_top(self, text: str, reply_markup: dict | None = None, key: str | None = None,
-                    event_ts: float | None = None) -> bool:
+                    event_ts: float | None = None, urgent: bool = False) -> bool:
         """Alerte « 🎯 À ne pas rater » : conversation privée avec le bot (ou sujet ‼️ du groupe), avec le son."""
         if key and self.db and self.db.alert_already_sent(key):
             return False
         if key and self.db:
             self.db.mark_alert_sent(key, "top")
         self._note_event(key, event_ts, "top")
-        self.queue.put_nowait((text, reply_markup, "__top__", None, None, key, 0, False))
+        item = (text, reply_markup, "__top__", None, None, key, 0, False)
+        self.queue.put_urgent(item) if urgent else self.queue.put_nowait(item)
         return True
 
     def _note_event(self, key: str | None, event_ts: float | None, kind: str) -> None:
