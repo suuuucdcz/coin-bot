@@ -410,9 +410,15 @@ class Toile:
         """Nouveau token d'un wallet neuf : sa racine passe-t-elle le seuil ? un maillon est-il déjà connu ?"""
         if w["racine"]:
             await self.examiner(w["racine"])
-        lw = self.p.lancements
-        if lw is None or t["creator"] in self.p.watched:
+        if t["creator"] in self.p.watched:
             return None   # créateur déjà suivi : le pipeline l'alerte en direct
+        if self.p.cibles is not None:
+            chaine = self.chaine(t["creator"]) or []
+            if chaine and await self.p.cibles.lien_toile(t, chaine):
+                return None   # 🎯 financé par un wallet d'une cible : son nouveau coin (alerte de la cible)
+        lw = self.p.lancements
+        if lw is None:
+            return None
         relie = await self.relier(t["creator"])
         if relie is None:
             return None

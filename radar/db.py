@@ -154,6 +154,12 @@ CREATE TABLE IF NOT EXISTS decollages (      -- tokens qui décollent : photo à
     issue TEXT             -- 24 h après : gros succès, succès, rug, mort (NULL = pas encore jugé)
 );
 CREATE INDEX IF NOT EXISTS decollages_a_juger ON decollages(photo) WHERE issue IS NULL;
+CREATE TABLE IF NOT EXISTS cibles (          -- devs suivis de près, chacun dans sa section (radar/cible.py)
+    nom     TEXT PRIMARY KEY,
+    racine  TEXT,          -- wallet du dev
+    notes   TEXT,          -- ce qu'on sait de lui (fiche épinglée)
+    cree    INTEGER
+);
 """
 
 
@@ -242,7 +248,7 @@ class DB:
         cutoff = int(time.time()) - days * 86400
         rows = self.conn.execute(
             "SELECT w.address FROM wallets w LEFT JOIN wallet_state s ON s.address = w.address "
-            "WHERE w.active = 1 AND (w.depth > 0 OR w.grp = 'découverte') "
+            "WHERE w.active = 1 AND (w.depth > 0 OR w.grp = 'découverte') AND COALESCE(w.grp, '') NOT LIKE 'cible:%' "
             "AND COALESCE(w.added_at, 0) < ? AND COALESCE(s.last_ts, 0) < ?", (cutoff, cutoff)).fetchall()
         return [r["address"] for r in rows]
 
@@ -503,6 +509,19 @@ class DB:
         r = self.conn.execute("SELECT COUNT(*), COUNT(issue), SUM(issue IN ('succès', 'gros succès')), SUM(alerte) "
                               "FROM decollages").fetchone()
         return {"photos": r[0], "juges": r[1], "succes": r[2] or 0, "alertes": r[3] or 0}
+
+    def cibles(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM cibles ORDER BY cree").fetchall()
+
+    def cible_add(self, nom: str, racine: str, notes: str = "") -> None:
+        self.conn.execute("INSERT OR REPLACE INTO cibles(nom, racine, notes, cree) VALUES(?, ?, ?, ?)",
+                          (nom, racine, notes, int(time.time())))
+        self.conn.commit()
+
+    def cible_membres(self) -> dict[str, str]:
+        """{adresse: nom de la cible} des wallets suivis d'une cible."""
+        return {r["address"]: r["grp"][len("cible:"):] for r in
+                self.conn.execute("SELECT address, grp FROM wallets WHERE active = 1 AND grp LIKE 'cible:%'")}
 
     def set_wallet_role(self, address: str, label: str, grp: str, role: str, depth: int) -> None:
         """Nouvelle identité d'un wallet déjà en base (ex. : un financeur promu par la toile)."""

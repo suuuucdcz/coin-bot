@@ -52,6 +52,7 @@ radar/
   lancements.py      # tokens pump.fun qui décollent -> argent du créateur remonté -> wallet neuf d'un dev connu ?
   toile.py           # « qui finance qui » pour CHAQUE token pump.fun (RPC publics) -> financeurs à succès suivis
   decollage.py       # 🚀 tokens qui décollent proprement (devs inconnus) + mesure silencieuse de ce qui marche
+  cible.py           # 🎯 un dev suivi de près dans SA section : tout en direct, jusqu'à son prochain coin
   discovery.py       # découverte auto : créateurs pump.fun à succès (+ leur bank) -> watchlist
   setup.py           # assistant de configuration (configurer.bat)
 data/watchlist.csv   # wallets de départ
@@ -115,6 +116,12 @@ Règles ajoutées à l'usage :
   donne le bilan (quels indices annonçaient les succès). Section : filtres prudents (`SEUILS`, à régler sur le bilan) +
   structure des détenteurs (seul appel Helius, candidats seulement), 6 alertes / h au plus. Pas « avant les bots » :
   les coins qui marchent font leur plus haut des heures ou des jours plus tard, le travail est le tri.
+- **Cibles (`cible.py`, une section 🎯 par cible)** : `python -m radar.cible ajouter <NOM> <dev> [--wallets …]`
+  (pris en compte en moins d'1 min). Groupe `cible:<NOM>` : aucun filtre (bavard, sourdine, tempête, sniper, usine,
+  ferme, purge, plafond) ; chaque tx racontée ; tout wallet NEUF financé rejoint la cible (sans limite de profondeur).
+  Prochain coin repéré par 4 chemins dédoublonnés (clé `cible_crea:<mint>`) : création vue par Helius, flux pump.fun,
+  toile (créateur financé par un wallet de la cible), achat du même token par 2 wallets de la cible en 10 min ;
+  alerte aussi dans ‼️ et épinglée.
 - **Quota Helius gratuit (1 M crédits/mois)** : toute nouvelle fonction qui appelle Helius par événement ou à chaque
   démarrage doit être mise en cache ou mémorisée en base ; suivi dans `/statut` et le journal (« RPC par méthode »).
 

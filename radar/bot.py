@@ -269,6 +269,7 @@ class Bot:
                                   self.p.lancements.status_line() if getattr(self.p, "lancements", None) else None,
                                   self.p.toile.status_line() if getattr(self.p, "toile", None) else None,
                                   self.p.decollage.status_line() if getattr(self.p, "decollage", None) else None,
+                                  self.p.cibles.status_line() if getattr(self.p, "cibles", None) else None,
                                   self.p.results.short_line() if getattr(self.p, "results", None) else None) if ligne],
             f"🧮 Depuis {datetime.fromtimestamp(self.p.decisions_since, PARIS):%H:%M} : "
             + esc(self.p.decisions_line()),

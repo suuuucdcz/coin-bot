@@ -51,6 +51,7 @@ class Pipeline(TopMixin, EvenementsMixin):
         self.lancements = None         # remontée des lancements qui décollent (radar/lancements.py)
         self.toile = None              # base « qui finance qui » tissée avec des RPC publics (radar/toile.py)
         self.decollage = None          # 🚀 décollages : photo, section, mesure (radar/decollage.py)
+        self.cibles = None             # 🎯 devs suivis de près, chacun dans sa section (radar/cible.py)
         self.mints: set[str] = set()   # adresses de la watchlist qui sont des contrats de token
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._burst: dict[str, list[float]] = defaultdict(list)
@@ -154,6 +155,10 @@ class Pipeline(TopMixin, EvenementsMixin):
         return is_service(self.db.wallet(address), self.db.get_label(address)) \
             or self.db.get(f"toile_service:{address}") == "1"
 
+    def is_cible(self, address: str | None) -> bool:
+        """Wallet d'une cible (🎯) : jamais filtré, jamais reclassé, jamais retiré automatiquement."""
+        return self.cibles is not None and self.cibles.cible_de(address) is not None
+
     def is_smart(self, address: str) -> bool:
         w = self.db.wallet(address)
         return bool(w and is_smart_role(w["role"]))
@@ -182,7 +187,7 @@ class Pipeline(TopMixin, EvenementsMixin):
         flags = ([f"lanceur en série : {n} tokens créés en 24 h (usine à tokens)"]
                  if n >= FACTORY_FLAG_24H else [])
         w = self.db.wallet(ev.wallet)
-        if n < FACTORY_UNWATCH_24H or self.dry_run or not w or w["depth"] == 0:
+        if n < FACTORY_UNWATCH_24H or self.dry_run or not w or w["depth"] == 0 or self.is_cible(ev.wallet):
             return False, flags  # la watchlist de départ n'est jamais retirée automatiquement
         nom = w["label"] or A.short(ev.wallet)
         self.db.put(f"factory:{ev.wallet}", int(time.time()))
@@ -198,6 +203,8 @@ class Pipeline(TopMixin, EvenementsMixin):
     async def _sniper_check(self, ev: Event) -> bool:
         """Un wallet suivi qui achète 5 tokens différents en 6 h n'est pas un satellite : c'est un sniper
         (vu en vrai : 2 « acheteurs précoces » achetaient un nouveau token toutes les 10 minutes)."""
+        if self.is_cible(ev.wallet):
+            return False   # une cible est suivie quoi qu'elle achète
         if self.is_sniper(ev.wallet):
             return True
         w = self.db.wallet(ev.wallet)
@@ -233,8 +240,8 @@ class Pipeline(TopMixin, EvenementsMixin):
 
     def _farm_check(self, grp: str, mint: str) -> bool:
         """Mémorise les tokens où le groupe « entre ». Trop de tokens différents = ferme de bots."""
-        if grp == SMART_GROUP:
-            return False   # le smart money entre dans beaucoup de tokens : ce n'est pas une ferme
+        if grp == SMART_GROUP or grp.startswith("cible:"):
+            return False   # le smart money entre dans beaucoup de tokens ; une cible est suivie quoi qu'elle fasse
         now = int(time.time())
         cle = f"grp_tokens:{grp}"
         vus = {m: t for m, t in json.loads(self.db.get(cle) or "{}").items() if now - t < FARM_WINDOW_S}
@@ -263,7 +270,8 @@ class Pipeline(TopMixin, EvenementsMixin):
             # et le radar refuserait justement les nouveaux wallets de dev.
             if watch_priority(role, depth) <= 1:
                 for w in self.db.least_active():
-                    if watch_priority(w["role"], w["depth"]) == 2 and w["grp"] not in self.cfg.rug_groups:
+                    if watch_priority(w["role"], w["depth"]) == 2 and w["grp"] not in self.cfg.rug_groups \
+                            and not (w["grp"] or "").startswith("cible:"):
                         await self.unwatch([w["address"]])
                         log.info("Watchlist pleine : %s mis en veille pour faire place à %s", w["label"], label)
                         break
@@ -348,6 +356,11 @@ class Pipeline(TopMixin, EvenementsMixin):
         if not tx:
             log.warning("Transaction introuvable : %s", sig)
             return []
+        if self.cibles is not None:
+            try:
+                await self.cibles.on_tx(sig, tx)   # 🎯 tout ce que font les wallets des cibles, dans leur section
+            except Exception:
+                log.exception("Cible : transaction %s non traitée", sig[:8])
         events = analyze(tx, self.watched - self.mints)
         # Contrat suivi (CA publié avant le lancement, cas $ASH) : la 1re tx sur un AMM qui le
         # touche = pool créé / trading ouvert, même si le wallet qui le fait n'est pas suivi.

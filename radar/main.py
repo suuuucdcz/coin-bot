@@ -26,6 +26,7 @@ from .confiance import watch_priority
 from .results import Results
 from .lancements import LaunchWatch
 from .smart import SmartMoney
+from .cible import Cibles
 from .decollage import Decollage
 from .toile import Toile
 from .sources import pumpportal
@@ -132,6 +133,9 @@ async def amain() -> int:
         if cfg.toile_enabled:
             pipeline.toile = Toile(pipeline)           # qui finance qui, pour chaque token pump.fun (RPC publics)
         pipeline.decollage = Decollage(pipeline)       # 🚀 décollages : photo, section, mesure
+        pipeline.cibles = Cibles(pipeline, tg)         # 🎯 devs suivis de près, chacun dans sa section
+        for nom in pipeline.cibles.recharger():
+            await pipeline.cibles.preparer(nom)
 
         async def on_new_token(msg: dict) -> None:
             await pipeline.on_pumpportal_create(msg)
@@ -139,6 +143,7 @@ async def amain() -> int:
             pipeline.lancements.on_new_token(msg)
             if pipeline.toile is not None:
                 pipeline.toile.on_new_token(msg)
+            pipeline.cibles.on_new_token(msg)          # 🎯 secours : créateur d'une cible vu dans le flux pump.fun
 
         heure: dict[str, deque] = defaultdict(deque)
         bavards: dict[str, float] = {}
@@ -165,6 +170,16 @@ async def amain() -> int:
             stats["notifs"] += 1
             notifs_addr[addr] += 1
             now = time.time()
+            if pipeline.is_cible(addr):
+                # 🎯 Cible : chaque transaction réussie est lue, sans filtre ni sourdine (aucune coupure possible)
+                if err is None:
+                    try:
+                        db.set_last_sig(addr, sig)
+                    except Exception:
+                        pass
+                    if not pipeline.seen_signature(sig):
+                        queue.put_nowait(sig)
+                return
             flot = tempete[addr]
             flot.append(now)
             while flot and now - flot[0] > STORM_WINDOW_S:
@@ -227,7 +242,7 @@ async def amain() -> int:
                     sigs = await rpc.signatures(addr, until=last, limit=50) if last else await rpc.signatures(addr, limit=1)
                     if sigs:
                         db.set_last_sig(addr, sigs[0]["signature"], sigs[0].get("blockTime"))
-                    if not last or bavards.get(addr, 0) > time.time():
+                    if not last or (bavards.get(addr, 0) > time.time() and not pipeline.is_cible(addr)):
                         continue  # premier démarrage (on part de maintenant) ou wallet très actif (pas de logs à trier)
                     for s in reversed(sigs):
                         if s.get("err") is None and time.time() - (s.get("blockTime") or 0) < BACKFILL_MAX_AGE_S:
@@ -434,6 +449,7 @@ async def amain() -> int:
         if pipeline.toile is not None:
             tasks += pipeline.toile.taches()
         tasks.append(in_background(pipeline.decollage.boucle()))
+        tasks.append(pipeline.cibles.boucle())
         try:
             await asyncio.gather(*tasks)
         finally:

@@ -101,7 +101,7 @@ HEADER_VERSION = "1"
 HEADER_VERSIONS = {"onchain": "2"}
 
 # Alertes secondaires : envoyées sans son (les importantes gardent la notification)
-QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes", "resultats"}
+QUIET_KINDS = {"transfer", "cex", "mute", "discovery", "trace", "devs", "system", "fakes", "resultats", "cible_info"}
 
 BOT_COMMANDS = [
     ("statut", "État du radar : sources, wallets suivis, alertes"),
@@ -193,6 +193,7 @@ class Telegram:
         self.db = db
         self.forum = False
         self.threads: dict[str, int] = {}
+        self.extra_topics: dict[str, tuple[str, str, int]] = {}   # sections ajoutées en route (une par cible)
         self.queue: asyncio.Queue = asyncio.Queue()
         self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
@@ -253,7 +254,7 @@ class Telegram:
         """Toutes les 2 min : sujets activés ou bot devenu admin ? On crée les compartiments manquants."""
         while True:
             await asyncio.sleep(120)
-            if self.forum and len(self.threads) == len(TOPICS):
+            if self.forum and all(k in self.threads for k in [*TOPICS, *self.extra_topics]):
                 continue
             try:
                 await self.setup_topics()
@@ -269,7 +270,7 @@ class Telegram:
         if not self.forum:
             log.info("Chat sans sujets : toutes les alertes arriveront au même endroit")
             return
-        for key in TOPICS:
+        for key in [*TOPICS, *self.extra_topics]:
             saved = self.db.get(f"topic:{self.chat_id}:{key}") if self.db else None
             if saved:
                 self.threads[key] = int(saved)
@@ -339,8 +340,22 @@ class Telegram:
                 self._icons = {}
         return self._icons
 
+    def add_topic(self, key: str, emoji: str, title: str, color: int) -> None:
+        """Déclare une section supplémentaire (créée par setup_topics / ensure_topic)."""
+        self.extra_topics[key] = (emoji, title, color)
+
+    async def ensure_topic(self, key: str) -> None:
+        """Crée tout de suite la section `key` si le groupe a des sujets et qu'elle manque."""
+        if not self.forum or key in self.threads:
+            return
+        saved = self.db.get(f"topic:{self.chat_id}:{key}") if self.db else None
+        if saved:
+            self.threads[key] = int(saved)
+            return
+        await self._create_topic(key)
+
     async def _create_topic(self, key: str) -> int:
-        emoji, title, color = TOPICS[key]
+        emoji, title, color = TOPICS.get(key) or self.extra_topics[key]
         icon = (await self._topic_icons()).get(emoji.replace("\ufe0f", ""))
         name = title if icon else f"{emoji} {title}"
         payload = {"chat_id": self.chat_id, "name": name, "icon_color": color}
